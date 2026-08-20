@@ -1,0 +1,13 @@
+node_modules/
+dist/
+vite.dev.log
+vite.err.log
+*.pid
+tools/venv/
+tools/sona/*.log
+tools/sona/sona.exe
+tools/sona/sona.zip
+tools/sona/ffmpeg.exe
+tools/sona/models/*.gguf
+tools/sona/models/*.bin
+stt_server.py
