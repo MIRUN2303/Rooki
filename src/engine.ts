@@ -16,6 +16,7 @@ export type Intent =
   | "remember"
   | "recall"
   | "whoami"
+  | "time"
   | "chat";
 
 export interface SourceRef {

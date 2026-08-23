@@ -67,6 +67,13 @@ export type MemoryKind =
   | "name" // names/entities
   | "fact"; // general facts
 
+export type MemoryLayer =
+  | "working" // current task/session only
+  | "semantic" // stable facts and user knowledge
+  | "episodic" // important past events
+  | "procedural" // successful repeatable workflows
+  | "conversation"; // recent dialogue
+
 export interface MemoryItem {
   id: number;
   kind: MemoryKind;
@@ -84,9 +91,9 @@ export const DEFAULT_SETTINGS: Settings = {
   masterName: "mirun",
   memoryOn: true,
   providers: {
-    groq: { key: "", model: "openai/gpt-oss-20b" },
-    gemini: { key: "", model: "gemini-2.5-flash" },
-    mistral: { key: "", model: "mistral-small-latest" },
+    groq: { key: "", model: "openai/gpt-oss-120b" },
+    gemini: { key: "", model: "gemini-3.5-flash-lite" },
+    mistral: { key: "", model: "" },
   },
 };
 
@@ -226,24 +233,27 @@ export function memoryRecall(query: string, limit = 5): MemoryItem[] {
     .slice(0, limit);
 }
 
-/* last selected video/music entry */
+/* last selected video/music entry (newest first) */
 export function lastContent(kind?: "video" | "music"): MemoryItem | undefined {
-  return loadMemories().find(
+  const candidates = loadMemories().filter(
     (m) => m.kind === "content" && (kind === undefined || m.meta?.kind === kind)
   );
+  return candidates.sort((a, b) => b.ts - a.ts)[0];
 }
 
-/* last research topic/request */
+/* last research topic/request (newest first) */
 export function lastTopic(): MemoryItem | undefined {
-  return loadMemories().find((m) => m.kind === "request" || m.kind === "result");
+  const candidates = loadMemories().filter((m) => m.kind === "request" || m.kind === "result");
+  return candidates.sort((a, b) => b.ts - a.ts)[0];
 }
 
 /* newest playable/actionable item (content, request or result) — for
    reference resolution like "yes, that one" */
 export function lastActivityItem(): MemoryItem | undefined {
-  return loadMemories().find(
+  const candidates = loadMemories().filter(
     (m) => m.kind === "content" || m.kind === "request" || m.kind === "result"
   );
+  return candidates.sort((a, b) => b.ts - a.ts)[0];
 }
 
 /* store a Q/A exchange (only when memory is on) */
@@ -406,42 +416,147 @@ export function retrieveContext(text: string, settings: Settings): MemoryContext
   return {
     items: relevant.slice(0, 8),
     perm,
-    lastVideo: all.find((m) => m.kind === "content" && m.meta?.kind === "video"),
-    lastMusic: all.find((m) => m.kind === "content" && m.meta?.kind === "music"),
-    lastTopic: all.find((m) => m.kind === "request" || m.kind === "result"),
+    lastVideo: newestByKind(all, "content", "video"),
+    lastMusic: newestByKind(all, "content", "music"),
+    lastTopic: newestByKind(all, "request", undefined) ?? newestByKind(all, "result", undefined),
     text,
   };
 }
 
-/* compact structured memory map — the ONLY memory shape sent to the LLM */
+/* async version with AI-guided selection — use when calling from an async
+   context and an LLM is configured; falls back to the sync keyword version */
+export async function retrieveContextAsync(text: string, settings: Settings, understanding?: { goal?: string; intent?: string; entities?: string[]; reference?: string | null } | null): Promise<MemoryContext> {
+  const all = settings.memoryOn ? loadMemories() : [];
+  const perm = loadPermanent();
+  const relevant = await retrieveRelevantMemories(text, settings, 8, understanding);
+  return {
+    items: relevant.map((r) => r.item),
+    perm,
+    lastVideo: newestByKind(all, "content", "video"),
+    lastMusic: newestByKind(all, "content", "music"),
+    lastTopic: newestByKind(all, "request", undefined) ?? newestByKind(all, "result", undefined),
+    text,
+  };
+}
+
+/* newest item for a kind/meta pair — Array.find returns oldest, so sort desc */
+function newestByKind(all: MemoryItem[], kind: MemoryKind, metaKind?: string): MemoryItem | undefined {
+  const candidates = metaKind
+    ? all.filter((m) => m.kind === kind && m.meta?.kind === metaKind)
+    : all.filter((m) => m.kind === kind);
+  return candidates.sort((a, b) => b.ts - a.ts)[0];
+}
+
+/* compact structured memory map — the ONLY memory shape sent to the LLM.
+   Sectioned Mark-LI style: identity first, then preferences / projects /
+   people / notes with per-section caps, under a "use naturally" header. */
 export function compactMemory(ctx: MemoryContext, limit = 3): string {
-  const lines: string[] = [];
-  ctx.perm.forEach((p) => lines.push(`permanent: ${truncate(p.text, 120)}`));
+  const lines: string[] = ["[WHAT YOU KNOW ABOUT THIS USER — use naturally, never recite]"];
+
+  /* identity: permanent facts are global */
+  ctx.perm.forEach((p) => lines.push(p.text.replace(/^The (assistant|user)'s name is /, (_m, who) => (who === "user" ? "Name: " : "Assistant name: "))));
+
+  const durable = ctx.items.filter((m) => m.kind === "fact" || m.kind === "pref" || m.kind === "name");
+  const seen = new Set<string>();
+  const uniq = durable.filter((m) => {
+    const k = m.meta?.key ?? m.text;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  const section = (title: string, items: MemoryItem[], cap: number) => {
+    if (!items.length) return;
+    lines.push("");
+    lines.push(`${title}:`);
+    items.slice(0, cap).forEach((m) => lines.push(`- ${truncate(m.text, 140)}`));
+  };
+
+  section("Preferences", uniq.filter((m) => m.kind === "pref"), 12);
+  section(
+    "Projects & Goals",
+    uniq.filter((m) => m.kind === "fact" && ["project", "brand", "goal"].includes(m.meta?.category ?? "")),
+    8
+  );
+  section(
+    "People",
+    uniq.filter((m) => m.meta?.category === "relationship"),
+    10
+  );
+  section("Notes", uniq.filter((m) => m.kind === "fact" && !["project", "brand", "goal", "relationship", "identity"].includes(m.meta?.category ?? "")), 8);
+
+  /* research line only on explicit reference, within freshness window */
   const topic = ctx.lastTopic;
   const fresh = !!topic && Date.now() - topic.ts < RESEARCH_WINDOW;
-  if (topic && fresh && isResearchRef(ctx.text)) lines.push(`research: "${truncate(topic.text.split("→")[0].trim(), 90)}"`);
-  /* last media is only injected when the message explicitly references it
-     ("play that again", "the song you played") — never by default */
-  const mediaRef = isMediaRef(ctx.text);
-  if (mediaRef && ctx.lastVideo) lines.push(`last_video: "${truncate(ctx.lastVideo.text, 90)}"`);
-  if (mediaRef && ctx.lastMusic) lines.push(`last_music: "${truncate(ctx.lastMusic.text, 90)}"`);
-  /* durable memory: one canonical line per key, newest wins */
-  const seen = new Set<string>();
-  ctx.items
-    .filter((m) => m.kind === "fact" || m.kind === "pref" || m.kind === "name")
-    .filter((m) => {
-      const k = m.meta?.key ?? m.text;
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    })
-    .slice(0, limit)
-    .forEach((f) => lines.push(`${f.kind}: ${truncate(f.text, 120)}`));
+  if (topic && fresh && isResearchRef(ctx.text)) lines.push(`Active research: "${truncate(topic.text.split("→")[0].trim(), 90)}"`);
+
+  /* media only when explicitly referenced */
+  if (isMediaRef(ctx.text)) {
+    if (ctx.lastVideo) lines.push(`Last video: "${truncate(ctx.lastVideo.text, 90)}"`);
+    if (ctx.lastMusic) lines.push(`Last music: "${truncate(ctx.lastMusic.text, 90)}"`);
+  }
+
+  /* recent conversation — follow-up glue only */
   ctx.items
     .filter((m) => m.kind === "conversation")
     .slice(0, 2)
-    .forEach((c) => lines.push(`recent: ${truncate(c.text.replace(/\n/g, " "), 200)}`));
-  return lines.join("\n");
+    .forEach((c) => lines.push(`Recent: ${truncate(c.text.replace(/\n/g, " "), 180)}`));
+
+  let out = lines.join("\n");
+  if (out.length > 2000) out = out.slice(0, 1997) + "…";
+  return out.includes("[WHAT YOU KNOW") ? out : "";
+}
+
+/* ---------------- session memory (Mark-LI pattern) ----------------
+   History of 1-2 sentence session summaries, max 3 kept; pop-on-use so a
+   briefing is never repeated. The LLM-generated SessionSummary (below)
+   feeds this history. Separate key — zero impact on the memory schema. */
+const SESSIONS_KEY = "rooki.sessions.v1";
+const SESSION_MAX = 3;
+
+interface SessionEntry {
+  date: string;
+  summary: string;
+  language?: string;
+}
+
+function loadSessions(): SessionEntry[] {
+  try {
+    const raw = localStorage.getItem(SESSIONS_KEY);
+    const list = raw ? (JSON.parse(raw) as SessionEntry[]) : [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function appendSessionHistory(summary: string, language?: string): void {
+  const s = (summary || "").trim();
+  if (!s) return;
+  const sessions = loadSessions();
+  sessions.push({
+    date: new Date().toISOString().slice(0, 10),
+    summary: s.slice(0, 280),
+    ...(language ? { language } : {}),
+  });
+  try {
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions.slice(-SESSION_MAX)));
+  } catch {
+    /* storage full/blocked — sessions are best-effort */
+  }
+}
+
+/** Return AND remove the newest summary — consumed once, never repeated. */
+export function popLastSession(): SessionEntry | null {
+  const sessions = loadSessions();
+  if (!sessions.length) return null;
+  const entry = sessions[sessions.length - 1];
+  try {
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions.slice(0, -1)));
+  } catch {
+    /* noop */
+  }
+  return entry;
 }
 
 /* ============================================================
@@ -615,9 +730,22 @@ export function classifyMemory(text: string): MemoryDecision {
 
 /* ---------- canonical upsert ---------- */
 
+/* ---------- canonical upsert ---------- */
+
+/* Mark-LI-style governance limits */
+const MAX_VALUE_LEN = 380;
+const DURABLE_CHAR_BUDGET = 2200;
+
+const durableChars = (items: MemoryItem[]) =>
+  items
+    .filter((m) => m.kind === "pref" || m.kind === "fact" || m.kind === "name")
+    .reduce((n, m) => n + m.text.length + JSON.stringify(m.meta ?? {}).length, 0);
+
 /* store or update ONE canonical record. Dedupe order:
    1. explicit targetId (rename case), 2. same kind+key, 3. same kind+text.
-   Newest explicit instruction wins; contradictions are replaced, not kept. */
+   Newest explicit instruction wins; contradictions are replaced, not kept.
+   Values are truncated; the durable store obeys a total character budget,
+   oldest-updated records trimmed first (Mark-LI pattern). */
 export function upsertMemory(kind: MemoryKind, text: string, meta: MemoryMeta = {}, targetId?: number): MemoryItem {
   const all = loadMemories();
   const nowTs = Date.now();
@@ -627,14 +755,25 @@ export function upsertMemory(kind: MemoryKind, text: string, meta: MemoryMeta = 
       ? all.findIndex((m) => m.kind === kind && m.meta?.key === meta.key)
       : all.findIndex((m) => m.kind === kind && m.text.toLowerCase() === text.toLowerCase());
   const metaOut = { ...cleanMeta(meta), active: "true", updatedAt: String(nowTs) };
+  const cleanText = text.length > MAX_VALUE_LEN ? text.slice(0, MAX_VALUE_LEN - 1) + "…" : text;
+  let item: MemoryItem;
   if (idx >= 0) {
-    const updated: MemoryItem = { ...all[idx], text, ts: nowTs, meta: { ...all[idx].meta, ...metaOut } };
-    all[idx] = updated;
-    saveMemories(all);
-    return updated;
+    item = { ...all[idx], text: cleanText, ts: nowTs, meta: { ...all[idx].meta, ...metaOut } };
+    all[idx] = item;
+  } else {
+    item = { id: ++memSeq, kind, text: cleanText, ts: nowTs, meta: metaOut };
+    all.push(item);
   }
-  const item: MemoryItem = { id: ++memSeq, kind, text, ts: nowTs, meta: metaOut };
-  all.push(item);
+  /* enforce durable budget: drop oldest-updated durable rows until it fits */
+  let guard = 0;
+  while (durableChars(all) > DURABLE_CHAR_BUDGET && guard++ < 50) {
+    const durableIdx = all
+      .map((m, i) => ({ m, i }))
+      .filter(({ m }) => m.kind === "pref" || m.kind === "fact" || m.kind === "name")
+      .sort((a, b) => Number(a.m.meta?.updatedAt ?? a.m.ts) - Number(b.m.meta?.updatedAt ?? b.m.ts))[0];
+    if (!durableIdx) break;
+    all.splice(durableIdx.i, 1);
+  }
   saveMemories(all.slice(-60));
   return item;
 }
@@ -663,6 +802,18 @@ export function storeSmartMemory(text: string): { action: MemoryDecision["action
 
 /* ---------- diagnostics (dev use; no UI wiring, no secrets) ---------- */
 
+/** Silently persist detected language as identity (Mark-LI pattern).
+    Upsert dedupes on key, so calling every turn is free. */
+export function rememberLanguage(lang: "en" | "zh"): void {
+  upsertMemory("fact", `User communicates in ${lang === "zh" ? "Chinese" : "English"}.`, {
+    memoryType: "permanent",
+    category: "identity",
+    key: "language",
+    source: "inferred",
+    confidence: "0.90",
+  });
+}
+
 export function memoryDebug(): Record<string, unknown> {
   const all = loadMemories();
   const byKind: Record<string, number> = {};
@@ -673,4 +824,193 @@ export function memoryDebug(): Record<string, unknown> {
     active: all.filter((m) => m.meta?.active !== "false").length,
     inactive: all.filter((m) => m.meta?.active === "false").length,
   };
+}
+
+/* ---------- memory layer classification ---------- */
+
+export function classifyMemoryLayer(kind: MemoryKind, meta?: Record<string, string>): MemoryLayer {
+  if (meta?.memoryType === "permanent") return "semantic";
+  if (meta?.memoryType === "temporary") return "semantic";
+  if (meta?.memoryType === "working") return "working";
+  if (meta?.memoryType === "activity") return "episodic";
+  switch (kind) {
+    case "conversation":
+      return "conversation";
+    case "request":
+    case "result":
+    case "content":
+      return "episodic";
+    case "pref":
+      return "semantic";
+    case "name":
+    case "fact":
+      return "semantic";
+    default:
+      return "working";
+  }
+}
+
+/* ---------- AI-guided memory selection ---------- */
+
+export interface AiMemoryPick {
+  ids: number[];
+  reason: string;
+}
+
+const MEMORY_SELECT_PROMPT = (lang: "en" | "zh") =>
+  `You are a memory relevance scorer for a voice assistant. Given the user's current message and a list of stored memories, pick ONLY the ones that would genuinely help understand or respond to this message. Reply as JSON: {"ids":[1,2,3],"reason":"..."} — ids is an array of memory ids, empty array if none are relevant. ` +
+  (lang === "zh"
+    ? "只选择与当前消息直接相关的记忆。不要因为记忆里有某个词就选它。"
+    : "Only select memories directly relevant to the current message. Do not select a memory just because it shares a word with the message.");
+
+export async function aiSelectMemories(
+  settings: Settings,
+  text: string,
+  candidates: MemoryItem[],
+  understanding?: { goal?: string; intent?: string; entities?: string[]; reference?: string | null } | null
+): Promise<AiMemoryPick> {
+  if (!anyProviderConfigured(settings) || candidates.length === 0) {
+    return { ids: [], reason: "no provider or no candidates" };
+  }
+  const ctxHint = understanding
+    ? `Turn understanding: goal="${understanding.goal ?? ""}" intent="${understanding.intent ?? ""}" entities=[${(understanding.entities ?? []).join(", ")}] reference="${understanding.reference ?? ""}"\n`
+    : "";
+  const prompt =
+    `${ctxHint}Message: "${truncate(text, 200)}"\n\nCandidates:\n` +
+    candidates.map((m) => `- id=${m.id} kind=${m.kind} text="${truncate(m.text, 120)}"`).join("\n");
+  const res = await llmJson<AiMemoryPick>(settings, MEMORY_SELECT_PROMPT("en"), prompt, {
+    purpose: "memory_select",
+    maxTokens: 200,
+    temperature: 0.2,
+  });
+  if (!res || !Array.isArray(res.ids)) return { ids: [], reason: "parse failed" };
+  const valid = res.ids.filter((id) => candidates.some((c) => c.id === id));
+  return { ids: valid, reason: res.reason || "" };
+}
+
+/* ---------- enhanced context retrieval ---------- */
+
+export interface RelevantMemory {
+  item: MemoryItem;
+  layer: MemoryLayer;
+  relevance: number;
+}
+
+export async function retrieveRelevantMemories(
+  text: string,
+  settings: Settings,
+  limit = 6,
+  understanding?: { goal?: string; intent?: string; entities?: string[]; reference?: string | null } | null
+): Promise<RelevantMemory[]> {
+  const all = settings.memoryOn ? loadMemories() : [];
+  const perm = loadPermanent();
+  const words = text.toLowerCase().split(/\W+/).filter((w) => w.length > 2);
+  const followUp = isFollowUpRef(text);
+
+  const candidates = all
+    .filter((m) => {
+      const hay = `${m.text} ${m.meta?.category ?? ""} ${m.meta?.key ?? ""}`.toLowerCase();
+      const overlap = words.length > 0 && words.some((w) => hay.includes(w));
+      switch (m.kind) {
+        case "name":
+          return true;
+        case "pref":
+        case "fact":
+          return overlap;
+        case "result":
+        case "request":
+        case "content":
+          return overlap || followUp;
+        case "conversation":
+          return followUp;
+        default:
+          return false;
+      }
+    })
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 20);
+
+  if (candidates.length <= limit) {
+    return candidates.map((m) => ({ item: m, layer: classifyMemoryLayer(m.kind, m.meta), relevance: 1 }));
+  }
+
+  const picks = await aiSelectMemories(settings, text, candidates, understanding);
+  const picked = candidates.filter((m) => picks.ids.includes(m.id));
+  const rest = candidates.filter((m) => !picks.ids.includes(m.id));
+  const result = [...picked, ...rest].slice(0, limit);
+  return result.map((m) => ({ item: m, layer: classifyMemoryLayer(m.kind, m.meta), relevance: picks.ids.includes(m.id) ? 1 : 0.3 }));
+}
+
+/* ---------- session summary ---------- */
+
+export interface SessionSummary {
+  topic: string;
+  highlights: string[];
+  ts: number;
+}
+
+const SESSION_SUMMARY_KEY = "rooki.session_summary.v1";
+
+export function saveSessionSummary(summary: SessionSummary, language?: string): void {
+  try {
+    localStorage.setItem(SESSION_SUMMARY_KEY, JSON.stringify(summary));
+  } catch {
+    /* noop */
+  }
+  /* also append to the consumed-once briefing history (Mark-LI pattern) */
+  const text = [summary.topic, ...summary.highlights].filter(Boolean).join(" — ");
+  appendSessionHistory(text, language);
+}
+
+export function loadSessionSummary(): SessionSummary | null {
+  try {
+    const raw = localStorage.getItem(SESSION_SUMMARY_KEY);
+    return raw ? (JSON.parse(raw) as SessionSummary) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function generateSessionSummary(settings: Settings, recentExchanges: { user: string; ai: string }[]): Promise<SessionSummary | null> {
+  if (!anyProviderConfigured(settings) || recentExchanges.length === 0) return null;
+  const body = recentExchanges.map((e, i) => `[${i + 1}] User: ${truncate(e.user, 100)}\n     AI: ${truncate(e.ai, 100)}`).join("\n");
+  const prompt = `Summarize this session in 1-2 sentences. Return JSON: {"topic":"...","highlights":["..."]}. Only the most important points.`;
+  const res = await llmJson<{ topic: string; highlights: string[] }>(settings, prompt, body, {
+    purpose: "session_summary",
+    maxTokens: 100,
+    temperature: 0.3,
+  });
+  if (!res || !res.topic) return null;
+  return { topic: truncate(res.topic, 120), highlights: (res.highlights ?? []).slice(0, 5).map((h) => truncate(h, 80)), ts: Date.now() };
+}
+
+/* ---------- memory consolidation ---------- */
+
+const CONSOLIDATE_PROMPT = (lang: "en" | "zh") =>
+  `You are a memory consolidation assistant. Given a candidate memory and existing memories, decide: STORE (new), UPDATE (replace existing), IGNORE (not useful). Reply as JSON: {"action":"store|update|ignore","targetId":null,"reason":"..."}. ` +
+  (lang === "zh"
+    ? "只有当这个记忆能明显改善未来互动时才存储。"
+    : "Only store if this would genuinely improve a future interaction.");
+
+export interface ConsolidateResult {
+  action: "store" | "update" | "ignore";
+  targetId?: number;
+  reason: string;
+}
+
+export async function consolidateMemory(settings: Settings, candidateText: string, existingMemories: MemoryItem[]): Promise<ConsolidateResult> {
+  if (!anyProviderConfigured(settings)) {
+    return { action: "store", reason: "no provider — default store" };
+  }
+  const prompt =
+    `Candidate: "${truncate(candidateText, 200)}"\n\nExisting memories:\n` +
+    existingMemories.map((m) => `- id=${m.id} ${m.kind}: "${truncate(m.text, 100)}"`).join("\n");
+  const res = await llmJson<{ action: "store" | "update" | "ignore"; targetId?: number; reason: string }>(
+    settings,
+    CONSOLIDATE_PROMPT("en"),
+    prompt,
+    { purpose: "memory_consolidate", maxTokens: 100, temperature: 0.1 }
+  );
+  if (!res || !res.action) return { action: "store", reason: "parse failed" };
+  return { action: res.action, targetId: res.targetId, reason: res.reason || "" };
 }

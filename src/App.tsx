@@ -15,6 +15,8 @@ import {
   stopSpeaking,
   STATE_COLORS,
   type VoiceState,
+  getInputDeviceId,
+  stopListening,
 } from "./voice";
 import { transcribe } from "./stt";
 import {
@@ -41,6 +43,8 @@ import {
   addMemory,
   clearMemories,
   memoryRecall,
+  rememberLanguage,
+  saveSessionSummary,
   retrieveContext,
   compactMemory,
   llmChatResult,
@@ -51,7 +55,7 @@ import {
   type LlmError,
   type Settings,
 } from "./memory";
-import { researchTopic, webImageSearch, type ImageRef } from "./research";
+import { researchTopic, webImageSearch, type ImageRef, type ResearchMode } from "./research";
 import {
   emotionStyle,
   refAction,
@@ -64,27 +68,30 @@ import VocalMeter from "./VocalMeter";
 import type { Message } from "./Chat";
 import type { MicResult } from "./voice";
 import { callAgent } from "./agent";
-import { itunesPlaylist, itunesTrack, type MediaItem } from "./tools";
+import { youtubeMusicSearch, youtubeVideoSearch, type MediaItem } from "./tools";
+import BootScreen from "./BootScreen";
 
 const loc = (b: Bi, lang: Lang) => b[lang];
 
-const LABELS: Record<VoiceState, Bi> = {
-  idle: bi("Ready", "就绪"),
-  listening: bi("Listening…", "聆听中…"),
-  thinking: bi("Thinking", "思考中"),
-  speaking: bi("Speaking", "正在回应"),
-  researching: bi("Researching", "研究中"),
-  completed: bi("Done", "完成"),
-};
-
-const now = () => {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
-};
-
-let msgId = 0;
-
 export default function App() {
+  const [booted, setBooted] = useState(false);
+
+  const LABELS: Record<VoiceState, Bi> = {
+    idle: bi("Ready", "就绪"),
+    listening: bi("Listening…", "聆听中…"),
+    thinking: bi("Thinking", "思考中"),
+    speaking: bi("Speaking", "正在回应"),
+    researching: bi("Researching", "研究中"),
+    completed: bi("Done", "完成"),
+  };
+
+  const now = () => {
+    const d = new Date();
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+  };
+
+  let msgId = 0;
+
   const [phase, setPhase] = useState<VoiceState>("idle");
   const [speakOn, setSpeakOn] = useState(true);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -116,6 +123,7 @@ export default function App() {
   const chatListRef = useRef<HTMLDivElement>(null);
   const turnRef = useRef(false);
   const lastResearchRef = useRef<ResearchResult | null>(null);
+  const sessionNotesRef = useRef<string[]>([]);
   const [sttText, setSttText] = useState<{ text: string; n: number } | null>(null);
   const [sttBusy, setSttBusy] = useState(false);
   const [sttErr, setSttErr] = useState(false);
@@ -141,6 +149,30 @@ export default function App() {
   };
 
   useEffect(() => () => { clearTimers(); stopMic(); }, []);
+
+  /* session summary on leave — consumed once at next boot, never repeats */
+  useEffect(() => {
+    const flush = () => {
+      const notes = sessionNotesRef.current;
+      if (!notes.length) return;
+      /* no-LLM path: journal the raw goals as a one-slot summary */
+      saveSessionSummary(
+        { topic: notes[notes.length - 1], highlights: notes.slice(0, -1), ts: Date.now() },
+        langRef.current
+      );
+      sessionNotesRef.current = [];
+    };
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, []);
 
   /* phases → css colors */
   const col = STATE_COLORS[phase];
@@ -204,6 +236,8 @@ export default function App() {
     setPhaseBoth("listening");
     startRecord();
     armCap();
+    /* NOTE: callers already ran startMic(deviceId) — do NOT open a second
+       stream here; leaked duplicate captures degraded recognition */
   };
 
   const micFailMsg = (r: MicResult) => {
@@ -225,14 +259,11 @@ export default function App() {
 
   const toggleVoice = () => {
     if (micOnRef.current) {
-      stopMic(); /* also kills the recorder */
-      micOnRef.current = false;
-      setSttBusy(false);
-      setPhaseBoth("idle");
+      stopListening();
       return;
     }
     if (busyRef.current || sttPendingRef.current) return;
-    startMic().then((r) => {
+    startMic(getInputDeviceId()).then((r) => {
       if (!r.ok) {
         pushMsg({ role: "ai", text: micFailMsg(r) });
         return;
@@ -245,7 +276,7 @@ export default function App() {
   useEffect(() => {
     const kick = () => {
       if (micOnRef.current) return;
-      startMic().then((r) => {
+startMic(getInputDeviceId() ?? undefined).then((r) => {
         if (r.ok) {
           startListening();
           window.removeEventListener("pointerdown", kick);
@@ -331,7 +362,7 @@ export default function App() {
 
   const researchSeqRef = useRef(0);
 
-  const startResearch = async (raw: string, lang: Lang, followUp = false, silent = false): Promise<ResearchResult | null> => {
+  const startResearch = async (raw: string, lang: Lang, followUp = false, silent = false, mode: ResearchMode = "search"): Promise<ResearchResult | null> => {
     if (busyRef.current && !silent) return null;
     busyRef.current = true;
     const seq = ++researchSeqRef.current;
@@ -356,6 +387,7 @@ export default function App() {
       lang,
       settings,
       followUp,
+      mode,
       isCurrent: () => seq === researchSeqRef.current,
       onLog,
     });
@@ -516,16 +548,9 @@ export default function App() {
     else answer(llmDownMsg(lang, res.error));
   };
 
-  /* deterministic path — used when no LLM key is configured */
+  /* media handling — plays in widget only, no external redirects */
   const performOpen = (kind: "youtube" | "music", query: string, lang: Lang) => {
     const q = query.trim();
-    const url =
-      kind === "youtube"
-        ? `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`
-        : `https://open.spotify.com/search/${encodeURIComponent(q)}`;
-    callAgent("browser.open", { url }).then((r) => {
-      if (!r.ok) window.open(url, "_blank", "noopener");
-    });
     rememberContent(settings, kind === "youtube" ? "video" : "music", "", q, q);
     return { query: q, kind: (kind === "youtube" ? "video" : "music") as "video" | "music" };
   };
@@ -533,38 +558,51 @@ export default function App() {
   const openMedia = (kind: "youtube" | "music", raw: string, lang: Lang, reply?: string) => {
     const q = openPayload(raw) || raw;
     performOpen(kind, q, lang);
+    
     if (kind === "music") {
-      /* fetch the track/playlist and show the widget in the data panel */
-      const isPlaylist = /playlist|歌单|播放列表|专辑|album/i.test(q);
-      (isPlaylist ? itunesPlaylist(q) : itunesTrack(q))
-        .then((t) => {
-          const item: MediaItem =
-            isPlaylist && Array.isArray(t)
-              ? { query: q, kind: "music", action: "opened", playlist: t }
-              : { query: q, kind: "music", action: "opened", track: !Array.isArray(t) ? t : null };
-          setMedia(item);
-          setMediaOpen(true);
-        })
-        .catch(() => {});
+      // Search YouTube Music and play in widget
+      youtubeMusicSearch(q).then((track) => {
+        const videoId = track?.videoId ?? "";
+        const item: MediaItem = {
+          query: q,
+          kind: "music",
+          action: "playing",
+          track,
+          embedUrl: videoId
+            ? `https://www.youtube.com/embed/${videoId}?autoplay=1&origin=${encodeURIComponent(window.location.origin)}`
+            : `https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(q)}&autoplay=1`,
+        };
+        setMedia(item);
+        setMediaOpen(true);
+      });
     } else {
-      setMedia({ query: q, kind: "video", action: "opened", embedUrl: `https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(q)}` });
-      setMediaOpen(true);
+      // Search YouTube and play in widget
+      youtubeVideoSearch(q).then((track) => {
+        const videoId = track?.videoId ?? "";
+        const item: MediaItem = {
+          query: q,
+          kind: "video",
+          action: "playing",
+          track,
+          embedUrl: videoId
+            ? `https://www.youtube.com/embed/${videoId}?autoplay=1&origin=${encodeURIComponent(window.location.origin)}`
+            : `https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(q)}&autoplay=1`,
+        };
+        setMedia(item);
+        setMediaOpen(true);
+      });
     }
     answer(reply ?? openReply(kind, q, lang));
   };
 
   const openGeneric = (query: string, lang: Lang, reply?: string) => {
+    // Play media in widget instead of opening external pages
     const q = query.trim();
-    const url =
-      /ytmusic|youtube music/i.test(q)
-        ? "https://music.youtube.com/"
-        : /youtube/i.test(q)
-          ? "https://www.youtube.com/"
-          : q.startsWith("http")
-            ? q
-            : `https://www.google.com/search?q=${encodeURIComponent(q)}`;
-    window.open(url, "_blank", "noopener");
-    answer(reply ?? openReply("youtube", q, lang));
+    if (/video|youtube/i.test(q) && !/music|song|audio|podcast/i.test(q)) {
+      openMedia("youtube", q, lang, reply);
+    } else {
+      openMedia("music", q, lang, reply);
+    }
   };
 
   const doRemember = (raw: string, lang: Lang) => {
@@ -669,7 +707,7 @@ export default function App() {
       lang,
       settings,
       performOpen: (kind: "youtube" | "music", q: string, l: Lang) => performOpen(kind, q, l),
-      startResearch: (r: string, l: Lang, followUp: boolean, silent: boolean) => startResearch(r, l, followUp, silent),
+      startResearch: (r: string, l: Lang, followUp: boolean, silent: boolean, mode?: ResearchMode) => startResearch(r, l, followUp, silent, mode),
       stopAll: (l: Lang) => stopAll(l),
       userText: raw,
     };
@@ -729,10 +767,23 @@ export default function App() {
       if (r) extra = { stats: r.stats, sources: r.sources };
     }
 
-    if (kind === "reply") answer(response || chatReply(raw, lang, names), emo);
+    if (kind === "reply") {
+      if (response.trim()) answer(response, emo);
+      else {
+        /* LLM returned nothing usable — deterministic engine takes over
+           (never surfaces the generic clarify line) */
+        fallbackSend(raw, lang);
+      }
+    }
     else if (kind === "clarify") answer(response, emo);
     else if (kind === "confirm") answer(response, emo);
     else answerWithData(response, extra, response, emo);
+
+    /* Mark-LI-style session journal: meaningful turns only */
+    if (runs.length || decision.mode === "research") {
+      const note = decision.goal || decision.interpreted_input || raw;
+      sessionNotesRef.current = [...sessionNotesRef.current.slice(-5), note.slice(0, 80)];
+    }
 
     const tr: TurnTrace = {
       input: raw,
@@ -756,6 +807,22 @@ export default function App() {
       followUp: context?.isFollowUp ? `YES (${context.confidence})` : "NO",
       refs: context?.references.join(", ") ?? "",
       contextReset: context?.shouldReset ? `YES — ${context.reason}` : "NO",
+      interpreted: decision.interpreted_input,
+      interpConf: decision.interpretation_confidence,
+      cognitive: {
+        intent: decision.mode,
+        goal: decision.goal,
+        memoryNeeded: memoryHits > 0,
+        memoriesRetrieved: memoryHits,
+        memoriesExcluded: 0,
+        researchNeeded: runs.some((r) => r.tool === "web.search" || r.tool === "web.followup"),
+        toolNeeded: runs.length > 0,
+        selectedTool: runs.map((r) => r.tool).join(", ") || undefined,
+        plan: runs.map((r) => r.tool).join(", "),
+        result: runs.every((r) => r.ok) ? "ok" : runs.some((r) => r.ok) ? "partial" : "failed",
+        finalResponse: response,
+        memoryUpdate: memorySaved ?? undefined,
+      },
     };
     setTrace((prev) => [...prev.slice(-19), tr]);
     asrRef.current = 0;
@@ -765,6 +832,7 @@ export default function App() {
     if (busyRef.current || turnRef.current || sttPendingRef.current) return;
     const lang: Lang = /[\u4e00-\u9fa5]/.test(raw) ? "zh" : "en";
     langRef.current = lang;
+    void rememberLanguage(lang); /* silent identity — deduped by key */
     pushMsg({ role: "user", text: raw });
     /* a new turn must not inherit the previous turn's research panel */
     setResult(null);
@@ -785,6 +853,10 @@ export default function App() {
   };
 
   /* ---------------- render ---------------- */
+
+  if (!booted) {
+    return <BootScreen onComplete={() => setBooted(true)} />;
+  }
 
   return (
     <>

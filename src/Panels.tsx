@@ -423,67 +423,31 @@ export function DataPanel({
 }
 
 /* ---------------- media (music/video) widget ---------------- */
+/* Uses YouTube Music for audio, YouTube for video — no external redirects */
 
-function MediaWidget({ media, lang }: { media: MediaItem; lang: Lang }) {
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const [playing, setPlaying] = useState(false);
-
-  const playUrl = (url: string) => {
-    const a = audioRef.current;
-    if (!a || !url) return;
-    a.src = url;
-    const p = a.play();
-    if (p) p.then(() => setPlaying(true)).catch(() => setPlaying(false));
-  };
-
-  const toggle = () => {
-    const a = audioRef.current;
-    if (!a) return;
-    if (a.paused) a.play().then(() => setPlaying(true)).catch(() => {});
-    else a.pause();
-    setPlaying(!a.paused);
-  };
-
+function MediaWidget({ media, lang }: { media: MediaItem | null; lang: Lang }) {
+  if (!media) return null;
+  
   const track = media.track ?? null;
-  const playlist = media.playlist ?? null;
-
-  /* autoplay the top result as soon as the widget appears */
-  useEffect(() => {
-    if (media.kind === "music" && track?.previewUrl) playUrl(track.previewUrl);
-    else if (media.kind === "music" && playlist?.[0]?.previewUrl) playUrl(playlist[0].previewUrl);
-    else setPlaying(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [media]);
-
-  /* browsers block autoplay without a user gesture — first tap/key anywhere starts playback */
-  useEffect(() => {
-    const tryPlay = () => {
-      const a = audioRef.current;
-      if (a && a.paused && a.src) a.play().then(() => setPlaying(true)).catch(() => {});
-    };
-    window.addEventListener("pointerdown", tryPlay, { once: true });
-    window.addEventListener("keydown", tryPlay, { once: true });
-    return () => {
-      window.removeEventListener("pointerdown", tryPlay);
-      window.removeEventListener("keydown", tryPlay);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [media]);
+  const isMusic = media.kind === "music";
+  const isVideo = media.kind === "video";
 
   return (
     <>
-      {media.kind === "video" && media.embedUrl && (
+      {/* YouTube iframe for both music and video */}
+      {media.embedUrl && (
         <div className="media-frame-wrap">
           <iframe
             className="media-frame"
             src={media.embedUrl}
-            title="video player"
+            title={isMusic ? "YouTube Music" : "YouTube Video"}
             allow="autoplay; encrypted-media; picture-in-picture"
             allowFullScreen
           />
         </div>
       )}
 
+      {/* Track info card */}
       {track && (
         <div className="media-card">
           {track.artwork ? (
@@ -496,70 +460,24 @@ function MediaWidget({ media, lang }: { media: MediaItem; lang: Lang }) {
             <span className="media-artist">{track.artist}</span>
           </div>
           <div className="media-controls">
-            <button
-              className={`media-play-btn${playing ? " on" : ""}`}
-              onClick={toggle}
-              aria-label={playing ? "pause" : "play"}
-            >
-              {playing ? (
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                  <rect x="3" y="2.5" width="3.4" height="11" rx="1" />
-                  <rect x="9.6" y="2.5" width="3.4" height="11" rx="1" />
-                </svg>
-              ) : (
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M5 2.8v10.4c0 .6.7 1 1.2.6l8-5.2c.5-.3.5-1 0-1.3l-8-5.2c-.5-.3-1.2.1-1.2.7z" />
-                </svg>
-              )}
-            </button>
-            {track.url && (
-              <a className="media-open" href={track.url} target="_blank" rel="noopener noreferrer">
-                {lang === "en" ? "Open track" : "打开单曲"}
-              </a>
-            )}
+            <span className="media-source-badge">
+              {isMusic ? "YouTube Music" : "YouTube"}
+            </span>
           </div>
         </div>
       )}
 
-      {!track && playlist && (
-        <ul className="media-list">
-          {playlist.map((t, i) => (
-            <li key={i} className={`media-list-item${i === 0 ? " first" : ""}`}>
-              {t.artwork && <img className="media-thumb" src={t.artwork} alt="" />}
-              <span className="media-list-meta">
-                <b>{t.title}</b>
-                <i>{t.artist}</i>
-              </span>
-              <button
-                className="media-mini-btn"
-                onClick={() => playUrl(t.previewUrl)}
-                aria-label={`play ${t.title}`}
-              >
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M5 2.8v10.4c0 .6.7 1 1.2.6l8-5.2c.5-.3.5-1 0-1.3l-8-5.2c-.5-.3-1.2.1-1.2.7z" />
-                </svg>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
       <footer className="panel-foot">
         <span>
-          {media.kind === "video"
+          {isMusic
             ? lang === "en"
-              ? "Top result on YouTube"
-              : "YouTube 顶部结果"
+              ? "Playing from YouTube Music"
+              : "从 YouTube Music 播放"
             : lang === "en"
-              ? playlist
-                ? `Playlist · ${playlist.length} tracks`
-                : "Preview from iTunes · full track on Spotify"
-              : playlist
-                ? `歌单 · ${playlist.length} 首`
-                : "iTunes 试听 · 完整版在 Spotify"}
+              ? "Playing from YouTube"
+              : "从 YouTube 播放"}
         </span>
       </footer>
-      <audio ref={audioRef} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} />
     </>
   );
 }

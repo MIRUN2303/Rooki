@@ -48,12 +48,18 @@ let ctx: AudioContext | null = null;
 let analyser: AnalyserNode | null = null;
 let stream: MediaStream | null = null;
 let micRunning = false;
+let selectedInputDeviceId: string | null = null;
+let recorder: MediaRecorder | null = null;
+let chunks: Blob[] = [];
 
 export type MicResult = { ok: boolean; reason?: "denied" | "nomic" | "busy" | "insecure" | "failed" };
 
-export async function startMic(): Promise<MicResult> {
+export async function startMic(deviceId?: string | null): Promise<MicResult> {
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const constraints: MediaStreamConstraints = {
+      audio: deviceId ? { deviceId: { exact: deviceId } } : true
+    };
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
     ctx = new AudioContext();
     const src = ctx.createMediaStreamSource(stream);
     analyser = ctx.createAnalyser();
@@ -61,6 +67,7 @@ export async function startMic(): Promise<MicResult> {
     analyser.smoothingTimeConstant = 0.7;
     src.connect(analyser);
     micRunning = true;
+    if (deviceId) selectedInputDeviceId = deviceId;
     micLoop();
     return { ok: true };
   } catch (e) {
@@ -70,6 +77,44 @@ export async function startMic(): Promise<MicResult> {
     if (name === "NotReadableError" || name === "AbortError") return { ok: false, reason: "busy" };
     return { ok: false, reason: window.isSecureContext ? "failed" : "insecure" };
   }
+}
+
+export function setInputDeviceId(deviceId: string | null) {
+  selectedInputDeviceId = deviceId;
+}
+
+export function getInputDeviceId(): string | null {
+  return selectedInputDeviceId;
+}
+
+export async function enumerateAudioInputDevices(): Promise<MediaDeviceInfo[]> {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter((d) => d.kind === "audioinput");
+  } catch {
+    return [];
+  }
+}
+
+export async function enumerateAudioOutputDevices(): Promise<MediaDeviceInfo[]> {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter((d) => d.kind === "audiooutput");
+  } catch {
+    return [];
+  }
+}
+
+export function isOutputDeviceSupported(): boolean {
+  if (typeof HTMLAudioElement === "undefined") return false;
+  const audio = document.createElement("audio");
+  return "setSinkId" in audio;
+}
+
+export function isOutputDeviceSelectionSupported(): boolean {
+  if (typeof HTMLAudioElement === "undefined") return false;
+  const audio = document.createElement("audio");
+  return "setSinkId" in audio;
 }
 
 export function stopMic() {
@@ -92,10 +137,10 @@ export function stopMic() {
   chunks = [];
 }
 
-/* ---------------- recording (feeds speech-to-text) ---------------- */
-
-let recorder: MediaRecorder | null = null;
-let chunks: Blob[] = [];
+export function stopListening() {
+  stopMic();
+  selectedInputDeviceId = null;
+}
 
 export function startRecord() {
   if (!stream || recorder) return;
@@ -164,46 +209,108 @@ function micLoop() {
   requestAnimationFrame(micLoop);
 }
 
-/* ---------------- speech synthesis + simulated envelope ---------------- */
+/* ---------------- output device support ---------------- */
 
-let envRaf = 0;
+  let ttsAudioElement: HTMLAudioElement | null = null;
 
-export function speak(text: string, lang: "en" | "zh", style?: { rate: number; pitch: number }) {
-  stopSpeaking();
-  if (!("speechSynthesis" in window) || !text) return;
-  window.speechSynthesis.resume(); /* un-wedge the engine if it silently stopped */
-  const u = new SpeechSynthesisUtterance(text);
-  const voices = window.speechSynthesis.getVoices();
-  const v = voices.find((vv) => vv.lang.startsWith(lang === "zh" ? "zh" : "en"));
-  if (v) u.voice = v;
-  u.rate = style?.rate ?? 1.02;
-  u.pitch = style?.pitch ?? 1;
-  window.speechSynthesis.speak(u);
+  function getTtsAudioElement(): HTMLAudioElement {
+    if (!ttsAudioElement) {
+      ttsAudioElement = document.createElement("audio");
+      ttsAudioElement.preload = "auto";
+    }
+    return ttsAudioElement;
+  }
 
-  const dur = Math.max(1400, text.length * 55);
-  const t0 = performance.now();
-  const tick = () => {
-    const t = (performance.now() - t0) / dur;
-    if (t >= 1) {
-      audio.level = 0;
-      audio.amplitude = 0;
+  export function setOutputDeviceId(deviceId: string | null) {
+    if (deviceId && isOutputDeviceSupported()) {
+      const audioEl = getTtsAudioElement();
+      audioEl.setSinkId(deviceId).catch((e) => {
+        console.warn("Failed to set output device:", e);
+      });
+    }
+  }
+
+  /* ---------------- speech synthesis queue + simulated envelope ---------------- */
+
+  let envRaf = 0;
+  const queue: { text: string; lang: "en" | "zh"; style?: { rate: number; pitch: number } }[] = [];
+  let busy = false;
+
+  if ("speechSynthesis" in window) {
+    window.speechSynthesis.addEventListener("voiceschanged", () => {
+      window.speechSynthesis?.getVoices();
+    });
+  }
+
+  function processQueue() {
+    if (busy || !queue.length) return;
+    const item = queue.shift()!;
+    busy = true;
+    _speak(item.text, item.lang, item.style);
+  }
+
+  function _speak(text: string, lang: "en" | "zh", style?: { rate: number; pitch: number }) {
+    cancelAnimationFrame(envRaf);
+    if (!("speechSynthesis" in window) || !text) {
+      busy = false;
+      processQueue();
       return;
     }
-    const e = Math.sin(Math.PI * Math.min(1, t * 1.12)) ** 1.3;
-    audio.level = e * (0.5 + 0.45 * Math.sin(t * 42) * Math.sin(t * 13.7));
-    audio.amplitude = e * 0.9 + audio.amplitude * 0.1;
-    audio.pitch = 0.42 + 0.22 * Math.sin(t * 29);
-    for (let i = 0; i < audio.freq.length; i++) {
-      const band = Math.max(0, Math.sin(t * (7 + i * 0.16) + i * 0.7) + Math.sin(t * 23 + i * 0.4) * 0.5);
-      audio.freq[i] = band * e * 0.7 * (1 - (i / audio.freq.length) * 0.55);
-    }
-    envRaf = requestAnimationFrame(tick);
-  };
-  tick();
-}
+    window.speechSynthesis.resume();
+    const u = new SpeechSynthesisUtterance(text);
+    const voices = window.speechSynthesis.getVoices();
+    const v = voices.find((vv) => vv.lang.startsWith(lang === "zh" ? "zh" : "en"));
+    if (v) u.voice = v;
+    u.rate = style?.rate ?? 1.02;
+    u.pitch = style?.pitch ?? 1;
+    const dur = Math.max(1400, text.length * 55);
+    const safety = setTimeout(() => {
+      busy = false;
+      processQueue();
+    }, dur + 600);
+    u.onend = () => {
+      clearTimeout(safety);
+      busy = false;
+      processQueue();
+    };
+    u.onerror = () => {
+      clearTimeout(safety);
+      busy = false;
+      processQueue();
+    };
+    window.speechSynthesis.speak(u);
 
-export function stopSpeaking() {
-  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-  cancelAnimationFrame(envRaf);
-  audio.level = 0;
-}
+    const t0 = performance.now();
+    const tick = () => {
+      const t = (performance.now() - t0) / dur;
+      if (t >= 1) {
+        audio.level = 0;
+        audio.amplitude = 0;
+        return;
+      }
+      const e = Math.sin(Math.PI * Math.min(1, t * 1.12)) ** 1.3;
+      audio.level = e * (0.5 + 0.45 * Math.sin(t * 42) * Math.sin(t * 13.7));
+      audio.amplitude = e * 0.9 + audio.amplitude * 0.1;
+      audio.pitch = 0.42 + 0.22 * Math.sin(t * 29);
+      for (let i = 0; i < audio.freq.length; i++) {
+        const band =
+          Math.max(0, Math.sin(t * (7 + i * 0.16) + i * 0.7) + Math.sin(t * 23 + i * 0.4) * 0.5);
+        audio.freq[i] = band * e * 0.7 * (1 - (i / audio.freq.length) * 0.55);
+      }
+      envRaf = requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  export function speak(text: string, lang: "en" | "zh", style?: { rate: number; pitch: number }) {
+    queue.push({ text, lang, style });
+    processQueue();
+  }
+
+  export function stopSpeaking() {
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    cancelAnimationFrame(envRaf);
+    queue.length = 0;
+    busy = false;
+    audio.level = 0;
+  }

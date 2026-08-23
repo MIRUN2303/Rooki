@@ -11,3 +11,9 @@ tools/sona/ffmpeg.exe
 tools/sona/models/*.gguf
 tools/sona/models/*.bin
 stt_server.py
+
+.kilo/
+__pycache__/
+stt_out.log
+stt_err.log
+tools/last_utterance.webm

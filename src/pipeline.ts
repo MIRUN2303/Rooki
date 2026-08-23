@@ -15,14 +15,17 @@ import {
   lastResearchResult,
   lastTopic,
   llmChat,
+  llmJson,
   llmJsonResult,
   loadMemories,
   rememberExchange,
   rememberRequest,
   retrieveContext,
+  retrieveContextAsync,
   classifyMemory,
   upsertMemory,
   truncate,
+  anyProviderConfigured,
   type LlmError,
   type Settings,
 } from "./memory";
@@ -48,6 +51,7 @@ export interface WorkingMemory {
   lastAction?: string;
   lastResult?: string;
   lastEntity?: string;
+  activeEntity?: string;
   mood?: string;
   activeMedia?: ActiveMedia;
   activeApp?: string;
@@ -58,6 +62,220 @@ export interface WorkingMemory {
 }
 
 const working: WorkingMemory = {};
+
+/* ---------------- conversation state (session working state) ----------------
+   Unlike WorkingMemory (single-field scratchpad), this is the authoritative
+   session record that persists across turns. It is NOT permanent memory —
+   it decays naturally when the session ends or context is reset. */
+
+export interface ConversationTurn {
+  role: "user" | "assistant";
+  text: string;
+  ts: number;
+  intent?: string;
+  tool?: string;
+}
+
+export interface ConversationState {
+  recentTurns: ConversationTurn[];
+  activeTopic: string | null;
+  activeEntities: string[];
+  activePerson: string | null;
+  activeProject: string | null;
+  activeTask: string | null;
+  activeResearch: string | null;
+  activeMedia: ActiveMedia | null;
+  activeFile: string | null;
+  activeApplication: string | null;
+  pendingGoal: string | null;
+  unresolvedReferences: string[];
+  recentToolResults: { tool: string; ok: boolean; summary: string }[];
+  recentUserIntent: string | null;
+  lastAssistantAction: string | null;
+  lastAssistantResult: string | null;
+}
+
+const conversation: ConversationState = {
+  recentTurns: [],
+  activeTopic: null,
+  activeEntities: [],
+  activePerson: null,
+  activeProject: null,
+  activeTask: null,
+  activeResearch: null,
+  activeMedia: null,
+  activeFile: null,
+  activeApplication: null,
+  pendingGoal: null,
+  unresolvedReferences: [],
+  recentToolResults: [],
+  recentUserIntent: null,
+  lastAssistantAction: null,
+  lastAssistantResult: null,
+};
+
+export function getConversationState(): ConversationState {
+  return conversation;
+}
+
+export function resetConversationState() {
+  conversation.recentTurns = [];
+  conversation.activeTopic = null;
+  conversation.activeEntities = [];
+  conversation.activePerson = null;
+  conversation.activeProject = null;
+  conversation.activeTask = null;
+  conversation.activeResearch = null;
+  conversation.activeMedia = null;
+  conversation.activeFile = null;
+  conversation.activeApplication = null;
+  conversation.pendingGoal = null;
+  conversation.unresolvedReferences = [];
+  conversation.recentToolResults = [];
+  conversation.recentUserIntent = null;
+  conversation.lastAssistantAction = null;
+  conversation.lastAssistantResult = null;
+}
+
+function updateConversationFromDecision(text: string, decision: TurnDecision) {
+  conversation.recentTurns.push({ role: "user", text, ts: Date.now(), intent: decision.goal });
+  if (conversation.recentTurns.length > 30) conversation.recentTurns = conversation.recentTurns.slice(-20);
+  conversation.activeTopic = decision.goal || conversation.activeTopic;
+  conversation.recentUserIntent = decision.goal;
+  conversation.lastAssistantAction = decision.mode;
+  if (decision.mode === "research") conversation.activeResearch = decision.goal;
+  if (decision.entities) conversation.activeEntities = decision.entities.slice(0, 5);
+}
+
+function updateConversationFromTool(tool: string, args: Record<string, unknown>, ok: boolean, summary: string) {
+  conversation.recentToolResults.push({ tool, ok, summary });
+  if (conversation.recentToolResults.length > 5) conversation.recentToolResults = conversation.recentToolResults.slice(-3);
+  switch (tool) {
+    case "music.play":
+      conversation.activeMedia = { type: "music", query: (args.query as string) || "", state: "playing" };
+      conversation.lastAssistantResult = `Playing ${args.query}`;
+      break;
+    case "video.play":
+      conversation.activeMedia = { type: "youtube", query: (args.query as string) || "", state: "playing" };
+      conversation.lastAssistantResult = `Playing ${args.query}`;
+      break;
+    case "app.open":
+      conversation.activeApplication = (args.name as string) || null;
+      conversation.lastAssistantResult = `Opened ${args.name}`;
+      break;
+    case "app.close":
+      if (conversation.activeApplication === args.name) conversation.activeApplication = null;
+      break;
+    case "web.search":
+      conversation.lastAssistantResult = summary || `Searched ${args.query}`;
+      break;
+    case "system.time":
+      conversation.lastAssistantResult = summary || "Time retrieved";
+      break;
+    default:
+      conversation.lastAssistantResult = summary || tool;
+  }
+}
+
+function updateConversationResponse(text: string) {
+  conversation.recentTurns.push({ role: "assistant", text, ts: Date.now() });
+  if (conversation.recentTurns.length > 30) conversation.recentTurns = conversation.recentTurns.slice(-20);
+  conversation.unresolvedReferences = [];
+}
+
+/* ---------------- session compression ----------------
+   When the conversation grows long, summarize older turns into a compact
+   context that preserves continuity without exhausting tokens. */
+
+const MAX_RECENT_TURNS = 12;
+const COMPRESS_AFTER = 20;
+let sessionSummary: string | null = null;
+
+export function getSessionSummary(): string | null {
+  return sessionSummary;
+}
+
+function compressSessionIfNeeded() {
+  if (conversation.recentTurns.length >= COMPRESS_AFTER) {
+    const older = conversation.recentTurns.slice(0, conversation.recentTurns.length - MAX_RECENT_TURNS);
+    const topics = [...new Set(older.filter((t) => t.role === "user").map((t) => t.intent).filter(Boolean))];
+    if (topics.length > 0) {
+      sessionSummary = sessionSummary
+        ? `${sessionSummary}; later: ${topics.join(", ")}`
+        : `Earlier: ${topics.join(", ")}`;
+    }
+    conversation.recentTurns = conversation.recentTurns.slice(-MAX_RECENT_TURNS);
+  }
+}
+
+/* ---------------- error recovery ----------------
+   Map failures to specific, honest recovery actions instead of a generic
+   "could you say that differently". */
+
+export type ErrorCategory =
+  | "stt_error"
+  | "provider_error"
+  | "parse_error"
+  | "research_error"
+  | "tool_error"
+  | "media_error"
+  | "memory_error"
+  | "cognitive_error";
+
+export interface ErrorRecovery {
+  category: ErrorCategory;
+  message: string;
+  retryable: boolean;
+  alternative?: string;
+}
+
+export function categorizeError(error: LlmError | null, context: { hasTools?: boolean; hasMedia?: boolean }): ErrorRecovery {
+  if (!error) {
+    return { category: "cognitive_error", message: "Something went wrong.", retryable: true };
+  }
+  switch (error.type) {
+    case "server_error":
+    case "network_error":
+    case "timeout_error":
+      return {
+        category: "provider_error",
+        message: "The AI provider is unavailable right now.",
+        retryable: true,
+        alternative: "Check your provider settings or try again in a moment.",
+      };
+    case "parse_error":
+      return {
+        category: "parse_error",
+        message: "I had trouble understanding the response format.",
+        retryable: true,
+      };
+    case "empty_response":
+      return {
+        category: "provider_error",
+        message: "The AI provider returned nothing.",
+        retryable: true,
+      };
+    case "rate_limit_error":
+      return {
+        category: "provider_error",
+        message: "Rate limit reached. Please wait a moment.",
+        retryable: true,
+      };
+    case "authentication_error":
+    case "permission_error":
+      return {
+        category: "provider_error",
+        message: "Provider authentication failed. Check your API key.",
+        retryable: false,
+      };
+    default:
+      return {
+        category: "cognitive_error",
+        message: "Something unexpected happened.",
+        retryable: true,
+      };
+  }
+}
 
 /* ---------------- context resolution (new message = new context) ----------------
    A message only connects to previous context when it clearly references it
@@ -143,6 +361,130 @@ export interface PlanStep {
   args: Record<string, unknown>;
 }
 
+export interface TurnUnderstanding {
+  goal: string;
+  intent: "conversation" | "information" | "action" | "system_action" | "media" | "research" | "memory" | "social_engagement" | "clarification";
+  contextNeed: "none" | "optional" | "required";
+  memoryNeed: "none" | "possible" | "required";
+  researchNeed: "none" | "possible" | "required";
+  toolNeed: "none" | "possible" | "required" | string;
+  continuation: boolean;
+  reference: string | null;
+  entities: string[];
+  confidence: number;
+}
+
+/* ---------------- unified cognitive state ---------------- */
+/* CognitiveState travels through the entire pipeline — one authoritative
+   state per turn. No independent rerouting, no competing interpreters. */
+
+export interface MemoryDecision {
+  action: "store" | "update" | "delete" | "ignore";
+  layer: "identity" | "semantic" | "preference" | "project" | "relationship" | "goal" | "episodic" | "procedural" | "working" | "conversation" | "research_cache";
+  domain: string;
+  key: string;
+  value: string;
+  targetId?: number;
+  confidence: number;
+  reason: string;
+}
+
+export interface CognitiveState {
+  /* input layer */
+  rawInput: string;
+  source: "voice" | "text" | "ui";
+  timestamp: number;
+
+  /* understanding */
+  understood: boolean;
+  interpretedInput: string;
+  interpretationConfidence: number;
+  intent: string;
+  goal: string;
+  entities: string[];
+  references: string[];
+  unresolvedReference: string | null;
+
+  /* context */
+  contextNeed: "none" | "optional" | "required";
+  isFollowUp: boolean;
+  activeContext: {
+    topic: string | null;
+    entity: string | null;
+    task: string | null;
+    project: string | null;
+    media: string | null;
+    research: string | null;
+  };
+
+  /* memory */
+  memoryNeed: "none" | "possible" | "required";
+  memoryCandidates: number;
+  memoriesSelected: number;
+  memoriesExcluded: number;
+  relevantMemoryIds: number[];
+  memoryDecision: MemoryDecision | null;
+
+  /* research */
+  researchNeed: "none" | "possible" | "required";
+  researchDecision: "none" | "fresh" | "followup" | "cache";
+
+  /* planning */
+  toolNeed: "none" | "possible" | "required";
+  selectedTools: string[];
+  toolParameters: Record<string, unknown>;
+  plan: PlanStep[];
+  needsClarification: boolean;
+  clarificationReason: string;
+
+  /* execution */
+  executionResults: ToolRun[];
+  retryCount: number;
+
+  /* response */
+  responsePlan: string;
+  finalResponse: string;
+
+  /* meta */
+  confidence: number;
+  emotion: { state: string; intensity: number };
+  provider: string;
+  model: string;
+  tokens: number;
+}
+
+/* canonical semantic decision — what the planner produces */
+export interface CanonicalDecision {
+  understood: boolean;
+  intent: string;
+  goal: string;
+  entities: string[];
+  references: string[];
+  research: boolean;
+  researchQuery: string | null;
+  tool: string | null;
+  parameters: Record<string, unknown>;
+  needsClarification: boolean;
+  clarificationReason: string;
+  response: string;
+  shouldRemember: boolean;
+  memoryDraft: {
+    content: string;
+    category: string;
+    importance: number;
+    confidence: number;
+    source: "explicit" | "inference";
+  } | null;
+  emotion: { state: string; intensity: number };
+  confidence: number;
+}
+
+export interface ReferenceResolution {
+  reference: string | null;
+  target: string | null;
+  confidence: number;
+}
+
 export interface TurnDecision {
   mode: Mode;
   goal: string;
@@ -153,6 +495,10 @@ export interface TurnDecision {
   clarification?: string;
   needs_clarification: boolean;
   confidence: number;
+  /* noisy-STT recovery: the meaning the model believes the user intended,
+     plus how sure it is. Raw transcript is NEVER overwritten. */
+  interpreted_input?: string;
+  interpretation_confidence?: number;
   emotion: { state: string; intensity: number };
   should_remember: boolean;
   memory_draft?: {
@@ -166,6 +512,8 @@ export interface TurnDecision {
     add?: { kind: "name" | "pref" | "fact"; text: string; importance: number }[];
     remove?: string[];
   };
+  /* extracted entities from canonical decision (person, place, project names) */
+  entities?: string[];
 }
 
 export interface ToolRun {
@@ -202,6 +550,64 @@ export interface TurnTrace {
   followUp: string;
   refs: string;
   contextReset: string;
+  /* noisy-STT recovery audit trail */
+  interpreted?: string;
+  interpConf?: number;
+  cognitive?: {
+    intent: string;
+    goal: string;
+    memoryNeeded: boolean;
+    memoriesRetrieved: number;
+    memoriesExcluded: number;
+    researchNeeded: boolean;
+    toolNeeded: boolean;
+    selectedTool?: string;
+    plan: string;
+    result: string;
+    finalResponse: string;
+    memoryUpdate?: string;
+    understanding?: {
+      goal: string;
+      intent: string;
+      contextNeed: string;
+      memoryNeed: string;
+      researchNeed: string;
+      toolNeed: string;
+      continuation: boolean;
+      reference: string | null;
+      entities: string[];
+      confidence: number;
+    };
+  };
+}
+
+export interface CognitiveDebug {
+  message: string;
+  activeTask: string | null;
+  intent: string;
+  goal: string;
+  memoryNeeded: boolean;
+  memoriesRetrieved: number;
+  memoriesExcluded: number;
+  researchNeeded: boolean;
+  toolNeeded: boolean;
+  selectedTool: string | null;
+  plan: string;
+  result: string;
+  finalResponse: string;
+  memoryUpdate: string | null;
+  understanding?: {
+    goal: string;
+    intent: string;
+    contextNeed: string;
+    memoryNeed: string;
+    researchNeed: string;
+    toolNeed: string;
+    continuation: boolean;
+    reference: string | null;
+    entities: string[];
+    confidence: number;
+  };
 }
 
 export type TurnKind = "reply" | "clarify" | "confirm" | "tools";
@@ -218,6 +624,7 @@ export interface TurnOutcome {
   synthMs: number;
   totalMs: number;
   context?: ContextResolution;
+  cognitive?: CognitiveDebug;
 }
 
 /* LLM failure — surfaced to the UI as an honest message, never hidden */
@@ -225,6 +632,7 @@ export interface TurnFailure {
   error: LlmError;
   decisionMs: number;
   context?: ContextResolution;
+  cognitive?: CognitiveDebug;
 }
 
 export type TurnResult = TurnOutcome | TurnFailure;
@@ -285,9 +693,39 @@ export function emotionStyle(state: string): { rate: number; pitch: number } {
       return { rate: 1.04, pitch: 0.96 };
     case "urgent":
       return { rate: 1.18, pitch: 1.02 };
-    default:
-      return { rate: 1.02, pitch: 1 };
+  default:
+    return { rate: 1.02, pitch: 1 };
   }
+}
+
+/* ---------------- turn understanding (AI-driven) ---------------- */
+
+const UNDERSTANDING_PROMPT = (lang: "en" | "zh") =>
+  `You are a cognitive understanding assistant. Analyze the user's message and return ONLY valid JSON:
+{"goal":"short goal","intent":"conversation|information|action|system_action|media|research|memory|social_engagement|clarification","contextNeed":"none|optional|required","memoryNeed":"none|possible|required","researchNeed":"none|possible|required","toolNeed":"none|possible|required|tool.name","continuation":false,"reference":null,"entities":[],"confidence":0.9}
+Rules:
+- intent: conversation=small talk/greetings/feelings; information=factual question; action=real-world command; system_action=system command like time/weather; media=play/pause/media; research=needs fresh data; memory=remember/forget; social_engagement="I'm bored"/"can you help"; clarification=ambiguous.
+- contextNeed: required if the message clearly references previous context (it/that/again/more/summary/etc). optional if it MIGHT reference context. none if it's a fresh request.
+- memoryNeed: required if previous context or stored facts would significantly help. possible if they might help. none if not needed.
+- researchNeed: required if current/live data is genuinely needed. possible if it might help. none if knowledge or memory suffices.
+- toolNeed: required if a specific tool is clearly needed (system.time, weather.get, system.volume_delta, etc). possible if a tool might help. none if not needed.
+- continuation: true only if this clearly continues a previous active task/topic.
+- reference: the likely antecedent if there's a reference (entity name, topic, or null).
+- entities: person/place/project names mentioned.
+- confidence: 0.0-1.0.
+Do NOT use keyword matching alone. Understand meaning. ` +
+  (lang === "zh" ? "中文消息也输出英文JSON键。" : "");
+
+export async function understandTurn(settings: Settings, text: string, lang: "en" | "zh"): Promise<TurnUnderstanding | null> {
+  if (!anyProviderConfigured(settings)) return null;
+  const res = await llmJson<TurnUnderstanding>(
+    settings,
+    UNDERSTANDING_PROMPT(lang),
+    `Message: "${truncate(text, 300)}"\nWorking context: ${JSON.stringify(working)}`,
+    { purpose: "understanding", maxTokens: 200, temperature: 0.2 }
+  );
+  if (!res || !res.goal) return null;
+  return res;
 }
 
 /* ---------------- prompt building ---------------- */
@@ -297,40 +735,36 @@ const SYSTEM = (
   master: string,
   lang: "en" | "zh"
 ) => `You are ${assistant}, a calm, curious, slightly playful voice-first assistant for ${master}. Reply ONLY as a single complete JSON object — nothing before it, nothing after it, no explanations, no markdown, no trailing text.
-Schema (fill in the values — keys and types are fixed):
-{"mode":"","goal":"","capability":null,"parameters":{},"plan":[],"response":"","clarification":"","needs_clarification":false,"confidence":0,"memory":{"add":[],"remove":[]}}
 
-EXAMPLES of how to route user messages:
-User: "Who is Buddha?" -> {"mode":"research","goal":"Who is Buddha?","capability":"web.search","parameters":{},"plan":[{"tool":"web.search","args":{"query":"Who is Buddha"}}],"response":"","clarification":"","needs_clarification":false,"confidence":0.9,"memory":null}
-User: "Can you read me a single full article about Buddha?" -> {"mode":"research","goal":"Read me a full article about Buddha","capability":"web.search","parameters":{},"plan":[{"tool":"web.search","args":{"query":"Buddha full article"}}],"response":"","clarification":"","needs_clarification":false,"confidence":0.9,"memory":null}
-User: "make it louder" -> {"mode":"action","goal":"raise the volume","capability":"system.volume_delta","parameters":{},"plan":[{"tool":"system.volume_delta","args":{"delta":"up"}}],"response":"","clarification":"","needs_clarification":false,"confidence":0.95,"memory":null}
-User: "how are you?" -> {"mode":"conversation","goal":"small talk","capability":null,"parameters":{},"plan":[],"response":"I'm doing great, thanks! What about you?","clarification":"","needs_clarification":false,"confidence":0.9,"memory":null}
-User: "make a pie chart of Tamil Nadu population. Tamil Nadu population 2021 is 73.8 million, growth 14.3% from 2001 to 2011" -> {"mode":"action","goal":"pie chart of Tamil Nadu population","capability":"chart.build","parameters":{},"plan":[{"tool":"chart.build","args":{"topic":"Tamil Nadu population","kind":"donut"}}],"response":"","clarification":"","needs_clarification":false,"confidence":0.9,"memory":null}
+OUTPUT FORMAT — output EXACTLY this JSON with your values filled in. Do NOT add prefixes like "mode_". Use these exact keys:
+{"understood":true,"intent":"","goal":"","entities":[],"references":[],"research":false,"researchQuery":null,"tool":null,"parameters":{},"needsClarification":false,"clarificationReason":"","response":"","shouldRemember":false,"emotion":{"state":"neutral","intensity":0.5},"confidence":0.9}
 
-AVAILABLE CAPABILITIES — pick by MEANING, not wording:
+DECISION PRINCIPLES (follow these, not hardcoded phrase tables):
+- You are the semantic interpreter. Understand what the user ACTUALLY wants, not just the words they used.
+- intent: conversation=small talk/greetings/feelings; information=factual question; action=real-world command; system_control=time/weather/volume; media=play/pause/media; research=needs fresh data; memory=remember/forget; social_engagement="I'm bored"/"can you help"; clarification=ambiguous.
+- research: true ONLY when current/live data is genuinely needed or explicitly requested. Do NOT research if you know the answer reliably.
+- tool: pick the right tool by MEANING. null for pure conversation.
+- needsClarification: ONLY when the ACTION ITSELF is genuinely undecidable. Never clarify for unknown entities — that is a research task.
+
+CAPABILITIES (pick by MEANING):
 ${CATALOG}
 
 RULES:
 - Language: reply in ${lang === "zh" ? "Chinese" : "English"}, spoken style, 1-3 short sentences. Vary your openings; never start with the same word every time. Never mention capabilities, tools, models, memory, JSON, or "execute/process".
-- You are the SEMANTIC INTERPRETER. Decide what the user ACTUALLY wants, then map it to the right capability. Any phrasing must work: "make it louder" == "volume up" == "I can't hear this" == "increase the audio".
-- KNOWLEDGE QUESTIONS ("who is X", "what is X", "tell me about X", "explain X", "history of X", "facts about X") and "read an article about X" -> research (web.search). Do NOT answer knowledge questions inline.
-- plan: at most 3 steps, only what's needed. Pure conversation (greetings, feelings, small talk, opinions) -> plan: [] and answer directly in response.
-- RESPONSE LENGTH: "response" is the spoken reply — keep it SHORT (1-2 sentences max) or leave it empty. For plan-based turns leave it empty; the final reply is built after the tools run. NEVER write a long answer inside "response".
-- CURRENT FACTS (time, date, weather, news, live events, "today / latest / now / current / what's happening"): NEVER invent them. Use a real tool: system.time, weather.get, or web.search. "what time is it" -> system.time. Weather with a location -> weather.get. News/current events -> web.search.
-- OBVIOUS ACTION: execute immediately, never ask what they mean. "volume up" -> system.volume_delta. "make the screen brighter" -> system.brightness_set. "pause"/"resume" -> media.control. "open Photoshop" -> app.open.
-- REFERENCES ("it","that","this","same","again","the one before","give me the summary","explain that in detail"): resolve from Working state and Memory. A research summary/follow-up should use research.last (no re-searching). If nothing relevant exists -> one short clarification.
-- needs_clarification: ONLY when truly ambiguous or a required parameter is missing. Put ONE short question in clarification, keep plan empty. Never clarify an obvious request.
-- MEMORY (auto-update every turn): put durable facts, preferences and habits the user shares into memory.add (kind: fact|pref, importance>0.8). Put anything the user asks you to forget or remove into memory.remove (the matching words, not a whole sentence). The user's name and your name are PERMANENT — never add, change or remove them, and never store them in memory. Never remember temporary state; output memory:null if nothing durable was said. When storing, prefer the memory_draft fields: category (identity|preference|habit|interest|project|goal|knowledge|relationship), confidence 1.0 only for explicit statements, source explicit|inference. Never remember passwords, API keys, tokens or secrets.
-- emotion: conversational tone only (happy|excited|curious|calm|sad|lonely|frustrated|angry|tired|stressed|overwhelmed|confused|playful|neutral|serious|urgent). Match the user's tone; warm and low-energy if they seem tired or lonely.
-- research: web.search with a good search query. "research about X" -> mode research, web.search. "explain X in detail" -> research.last to expand what we have.
-- "read an article on/about X" -> research (web.search). Local file reading is NOT available; never claim to have opened a file.
+- RESPONSE LENGTH: "response" is the spoken reply — keep it SHORT (1-2 sentences max) or leave it empty. For tool-based turns leave it empty; the final reply is built after the tools run. NEVER write a long answer inside "response".
+- CURRENT FACTS (time, date, weather, news, live events): NEVER invent them. Use a real tool: system.time, weather.get, or web.search. "what time is it" -> system.time.
+- OBVIOUS ACTION: execute immediately, never ask what they mean. "volume up" -> system.volume_delta. "make the screen brighter" -> system.brightness_set. "pause"/"resume" -> media.control.
+- REFERENCES ("it","that","this","same","again"): resolve from Working state and Memory. If nothing relevant exists -> one short clarification.
+- NOISY VOICE INPUT: text may contain speech-to-text damage. A mangled or UNKNOWN ENTITY must NEVER cause clarification — reconstruct the closest plausible entity and act on the clear intent. Person/thing questions ("who is X") are ALWAYS research with your best reconstruction of X.
+- MEMORY: silently store durable facts/preferences/projects/goals the user shares; UPDATE existing records instead of duplicating (latest statement wins). Never announce that you stored something. The user's name and your name are PERMANENT — never store them. Never remember secrets/temp state. Most turns: nothing durable.
+- ACT, DON'T ASK: when intent is clear, assume reasonable defaults and proceed immediately.
+- emotion: match the user's tone; warm and low-energy if they seem tired or lonely.
 - media: music.play / video.play; if the user references earlier playback, use Working.activeMedia for context.
-- CHART/ANALYTICS: "pie chart", "chart", "graph", "percentage breakdown", "analytics", "stats as a chart" -> chart.build with the topic and kind (donut for pie/percentages, bars for comparisons, line for trends). Research the topic first (web.search) so the chart is built from real data. NEVER suggest external tools like Excel or Google Sheets — ALWAYS build the chart yourself with chart.build.
-- quiz: "ask me a quiz/question" -> quiz.start; answering one -> quiz.answer.
-- FINAL CHECK: Asking about, reading, researching, or explaining a topic = research. A direct command = action. Greetings, feelings and opinions = conversation. Vague or ambiguous = clarification. Pick the mode that SERVES the user, not the friendliest one.`;
+- chart/build visuals: only when the user's goal requires visualization. "show this as a chart" -> chart.build. "summarize these numbers" -> text summary.
+- FINAL CHECK: Pick the intent that SERVES the user. If you are confident in your own knowledge, answer directly. Research only when you genuinely need fresh data.`;
 
-function buildContext(text: string, settings: Settings, lang: "en" | "zh", cx: ContextResolution): string {
-  const ctx = retrieveContext(text, settings);
+async function buildContext(text: string, settings: Settings, lang: "en" | "zh", cx: ContextResolution, understanding: TurnUnderstanding | null): Promise<string> {
+  const ctx = await retrieveContextAsync(text, settings, understanding);
   const mem = compactMemory(ctx, 2);
   const lastRes = lastResearchResult();
   const resRef = isResearchRef(text);
@@ -344,6 +778,35 @@ function buildContext(text: string, settings: Settings, lang: "en" | "zh", cx: C
   });
   const parts: string[] = [];
   parts.push(`Today: ${today}`);
+
+  /* entity resolution for references */
+  const refMatch = text.match(/\b(it|that|this|there|same|again|the one|previous|last|him|her|them|那个|这个|它|那里|上次|之前)\b/i);
+  if (refMatch) {
+    const resolved = resolveEntity(refMatch[0]);
+    if (resolved) parts.push(`Resolved reference "${refMatch[0]}" -> "${resolved}"`);
+  }
+
+  /* conversation history (recent turns for continuity) */
+  const conv = conversation.recentTurns.slice(-6);
+  if (conv.length > 0) {
+    const history = conv
+      .map((t) => `${t.role === "user" ? "User" : "You"}: ${trunc150(t.text)}`)
+      .join("\n");
+    parts.push(`Recent conversation:\n${history}`);
+  }
+
+  /* session compression summary */
+  if (sessionSummary) parts.push(`Session summary: ${sessionSummary}`);
+
+  /* active context */
+  const activeCtx: string[] = [];
+  if (conversation.activeTopic) activeCtx.push(`topic: ${conversation.activeTopic}`);
+  if (conversation.activeEntities.length) activeCtx.push(`entities: ${conversation.activeEntities.join(", ")}`);
+  if (conversation.activePerson) activeCtx.push(`person: ${conversation.activePerson}`);
+  if (conversation.activeProject) activeCtx.push(`project: ${conversation.activeProject}`);
+  if (conversation.pendingGoal) activeCtx.push(`pending: ${conversation.pendingGoal}`);
+  if (activeCtx.length) parts.push(`Active context: ${activeCtx.join("; ")}`);
+
   if (cx.isFollowUp) parts.push("Follow-up: " + (cx.references.length ? cx.references.join(", ") : "previous context"));
   parts.push("Working state: " + JSON.stringify(working));
   if (mem) parts.push("Memory:\n" + mem);
@@ -352,6 +815,7 @@ function buildContext(text: string, settings: Settings, lang: "en" | "zh", cx: C
 }
 
 const trunc120 = (s: string) => (s.length > 120 ? s.slice(0, 117) + "…" : s);
+const trunc150 = (s: string) => (s.length > 150 ? s.slice(0, 147) + "…" : s);
 const trunc200 = (s: string) => (s.length > 200 ? s.slice(0, 197) + "…" : s);
 
 /* ---------------- sanitize ---------------- */
@@ -359,12 +823,103 @@ const trunc200 = (s: string) => (s.length > 200 ? s.slice(0, 197) + "…" : s);
 const MODES = new Set(["conversation", "action", "research", "clarification"]);
 const toolExists = (n: string) => ALL_TOOLS.some((t) => t.name === n);
 
+/* some models prefix every field with "mode_" — normalize them back */
+function remapModePrefixed(d: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...d };
+  const prefixes = ["mode_", "mode-"];
+  const knownKeys = ["mode", "goal", "capability", "parameters", "plan", "response", "clarification", "needs_clarification", "confidence", "memory", "emotion", "should_remember", "memory_draft"];
+  for (const key of Object.keys(d)) {
+    const lower = key.toLowerCase();
+    for (const prefix of prefixes) {
+      if (lower.startsWith(prefix)) {
+        const rest = lower.slice(prefix.length);
+        if (knownKeys.includes(rest) && !(rest in out)) {
+          out[rest] = d[key];
+        }
+      }
+    }
+  }
+  /* if mode is still empty but we found mode_mode, use it */
+  if ((out.mode as string) === "" && out.mode_mode) out.mode = out.mode_mode;
+  return out;
+}
+
 function sanitize(raw: unknown): TurnDecision | null {
   if (!raw || typeof raw !== "object") return null;
   const d = raw as Record<string, unknown>;
-  if (!MODES.has(d.mode as string)) return null;
-  const plan: PlanStep[] = Array.isArray(d.plan)
-    ? d.plan
+
+  /* detect format: canonical (understood/intent/tool) vs legacy (mode) */
+  const isCanonical = "understood" in d || "intent" in d || "tool" in d;
+
+  if (isCanonical) {
+    /* normalize canonical format into TurnDecision */
+    const intent = (d.intent as string) || "conversation";
+    const tool = (d.tool as string) || null;
+    const needsClarification = d.needsClarification === true;
+    const research = d.research === true;
+
+    /* derive mode from canonical intent/tool */
+    let mode: Mode = "conversation";
+    if (needsClarification) mode = "clarification";
+    else if (research || intent === "research") mode = "research";
+    else if (tool || intent === "action" || intent === "system_control" || intent === "media") mode = "action";
+
+    const plan: PlanStep[] = [];
+    if (tool && toolExists(tool)) {
+      plan.push({ tool, args: (d.parameters as Record<string, unknown>) || {} });
+    }
+    /* also handle array-based plan if present */
+    if (Array.isArray(d.plan)) {
+      for (const s of d.plan) {
+        if (s && typeof s === "object" && typeof (s as PlanStep).tool === "string" && toolExists((s as PlanStep).tool)) {
+          plan.push({ tool: (s as PlanStep).tool, args: ((s as PlanStep).args as Record<string, unknown>) || {} });
+        }
+      }
+    }
+
+    const emotion = (d.emotion as Record<string, unknown>) ?? {};
+    return {
+      mode,
+      goal: typeof d.goal === "string" ? d.goal.slice(0, 120) : "",
+      capability: tool,
+      parameters: (d.parameters as Record<string, unknown>) || {},
+      plan: plan.slice(0, 3),
+      response: typeof d.response === "string" ? speechClean(d.response).slice(0, 320) : "",
+      clarification: typeof d.clarificationReason === "string" ? d.clarificationReason.slice(0, 140) : undefined,
+      needs_clarification: needsClarification,
+      confidence: clamp01(Number(d.confidence ?? 0.5)),
+      interpreted_input: typeof d.goal === "string" ? d.goal.slice(0, 200) : undefined,
+      interpretation_confidence: clamp01(Number(d.confidence ?? 0.5)),
+      emotion: {
+        state: typeof emotion.state === "string" ? emotion.state : "neutral",
+        intensity: clamp01(Number(emotion.intensity ?? 0.5)),
+      },
+      should_remember: d.shouldRemember === true,
+    };
+  }
+
+  /* legacy mode-based format */
+  const modeVal = d.mode as string;
+  const prefixes = ["mode_", "mode-"];
+  const knownKeys = ["mode", "goal", "capability", "parameters", "plan", "response", "clarification", "needs_clarification", "confidence", "memory", "emotion", "should_remember", "memory_draft"];
+  const out: Record<string, unknown> = { ...d };
+  for (const key of Object.keys(d)) {
+    const lower = key.toLowerCase();
+    for (const prefix of prefixes) {
+      if (lower.startsWith(prefix)) {
+        const rest = lower.slice(prefix.length);
+        if (knownKeys.includes(rest) && !(rest in out)) {
+          out[rest] = d[key];
+        }
+      }
+    }
+  }
+  if ((out.mode as string) === "" && out.mode_mode) out.mode = out.mode_mode;
+  const remapped = MODES.has(out.mode as string) ? out : remapModePrefixed(out);
+  if (!remapped || !MODES.has(remapped.mode as string)) return null;
+  const dd = remapped;
+  const plan: PlanStep[] = Array.isArray(dd.plan)
+    ? dd.plan
         .filter((s): s is PlanStep => !!s && typeof s === "object" && typeof (s as PlanStep).tool === "string" && toolExists((s as PlanStep).tool))
         .slice(0, 3)
         .map((s) => ({
@@ -372,10 +927,10 @@ function sanitize(raw: unknown): TurnDecision | null {
           args: (s as PlanStep).args && typeof (s as PlanStep).args === "object" ? (s as PlanStep).args : {},
         }))
     : [];
-  const emotion = (d.emotion as Record<string, unknown>) ?? {};
+  const emotion = (dd.emotion as Record<string, unknown>) ?? {};
   const decision: TurnDecision = {
-    mode: d.mode as Mode,
-    goal: typeof d.goal === "string" ? d.goal.slice(0, 120) : "",
+    mode: dd.mode as Mode,
+    goal: typeof dd.goal === "string" ? dd.goal.slice(0, 120) : "",
     capability: typeof d.capability === "string" ? d.capability : null,
     parameters: d.parameters && typeof d.parameters === "object" ? (d.parameters as Record<string, unknown>) : {},
     plan,
@@ -383,6 +938,10 @@ function sanitize(raw: unknown): TurnDecision | null {
     clarification: typeof d.clarification === "string" ? d.clarification.slice(0, 140) : undefined,
     needs_clarification: d.needs_clarification === true,
     confidence: clamp01(Number(d.confidence ?? 0.5)),
+    interpreted_input:
+      typeof d.interpreted_input === "string" ? d.interpreted_input.trim().slice(0, 200) || undefined : undefined,
+    interpretation_confidence:
+      d.interpretation_confidence === undefined ? undefined : clamp01(Number(d.interpretation_confidence)),
     emotion: {
       state: typeof emotion.state === "string" ? emotion.state : "neutral",
       intensity: clamp01(Number(emotion.intensity ?? 0.5)),
@@ -577,6 +1136,33 @@ function confirmQuestion(plan: PlanStep[], lang: "en" | "zh"): string {
     : `I'll ${acts.join(", then ")}. Go ahead?`;
 }
 
+/* ---------------- entity resolution ---------------- */
+/* resolve pronouns/references using working memory + recent context */
+export function resolveEntity(ref: string): string | null {
+  const r = ref.toLowerCase().trim();
+  /* direct matches from working memory */
+  if (working.activeEntity && /(it|that|this|the one|那个|这个|它)/i.test(r)) {
+    return working.activeEntity;
+  }
+  if (working.topic && /(that|that topic|that research|that one|那个|这个)/i.test(r)) {
+    return working.topic;
+  }
+  if (working.activeMedia?.query && /(that song|that video|that music|that track|那首歌|那个视频)/i.test(r)) {
+    return working.activeMedia.query;
+  }
+  if (working.activeLocation && /(there|that place|那个地方)/i.test(r)) {
+    return working.activeLocation;
+  }
+  /* "the previous / last one" → last content or research */
+  if (/(previous|last|上次|之前|上一个)/i.test(r)) {
+    const lastContent = loadMemories().filter((m) => m.kind === "content").sort((a, b) => b.ts - a.ts)[0];
+    if (lastContent?.meta?.query) return lastContent.meta.query;
+    const lastRes = loadMemories().filter((m) => m.kind === "result").sort((a, b) => b.ts - a.ts)[0];
+    if (lastRes?.meta?.topic) return lastRes.meta.topic;
+  }
+  return null;
+}
+
 /* ---------------- synthesis ---------------- */
 
 function synthSystem(assistant: string, master: string, lang: "en" | "zh") {
@@ -624,6 +1210,7 @@ async function executePlan(
     if (!tool) continue;
     const res = await executeTool(tool, step.args, deps);
     updateWorkingFromTool(step.tool, step.args, res);
+    updateConversationFromTool(step.tool, step.args, res.ok, res.summary ?? "");
     runs.push({
       tool: step.tool,
       args: step.args,
@@ -662,6 +1249,11 @@ export async function runTurn(
   const cx = resolveContext(msg);
   if (cx.shouldReset) resetWorkingContext();
 
+  /* AI turn understanding: lightweight semantic analysis before memory
+     retrieval. This tells us whether context is actually needed, what the
+     user wants, and which memories might be relevant. */
+  const understanding = await understandTurn(settings, msg, lang);
+
   /* pending confirmation from a previous turn? */
   if (pending) {
     const held = pending;
@@ -689,9 +1281,9 @@ export async function runTurn(
     }
   }
 
-  const user = `Message: "${trunc200(msg)}"\n` + buildContext(msg, settings, lang, cx);
+  const user = `Message: "${trunc200(msg)}"\n` + await buildContext(msg, settings, lang, cx, understanding);
   const RETRY_HINT =
-    "\n\nYour previous reply was cut off or malformed. Output the complete JSON now. Keep \"response\" under 40 words or empty.";
+    "\n\nYour previous reply was cut off or malformed. Output the complete JSON now with EXACTLY these keys (no prefixes like mode_): mode, goal, capability, parameters, plan, response, clarification, needs_clarification, confidence, memory. Keep \"response\" under 40 words or empty.";
   const attempt = async (hint: string) =>
     llmJsonResult<TurnDecision>(
       settings,
@@ -709,6 +1301,38 @@ export async function runTurn(
   }
   const decisionMs = Math.round(performance.now() - t0);
   if (!decision) {
+    /* Salvage: the model returned a structurally-valid decision object but
+       left it empty (happens on garbled/noise input). Ask the user to
+       repeat instead of surfacing an infrastructure error. */
+    const raw = res.data as Record<string, unknown> | null;
+    if (raw && typeof raw === "object" && !raw.mode) {
+      return {
+        kind: "clarify",
+        decision: {
+          mode: "clarification",
+          goal: "",
+          capability: null,
+          parameters: {},
+          plan: [],
+          response: "",
+          clarification:
+            lang === "zh" ? "我没太听清，能再说一遍吗？" : "I didn't quite catch that — mind repeating it?",
+          needs_clarification: true,
+          confidence: 0.3,
+          emotion: { state: "confused", intensity: 0.4 },
+          should_remember: false,
+        },
+        runs: [],
+        response: lang === "zh" ? "我没太听清，能再说一遍吗？" : "I didn't quite catch that — mind repeating it?",
+        memoryHits: retrieveContext(msg, settings).items.length,
+        memorySaved: null,
+        decisionMs,
+        planMs: 0,
+        synthMs: 0,
+        totalMs: Math.round(performance.now() - t0),
+        context: cx,
+      };
+    }
     return {
       error:
         res.error ??
@@ -724,101 +1348,83 @@ export async function runTurn(
   }
 
   const memorySaved = applyMemory(decision);
+  /* canonical user text: interpreted meaning when the model reconstructed one,
+     raw transcript otherwise. Raw is never overwritten — only memory's copy
+     of "what the user meant" upgrades. */
+  const saidText = decision.interpreted_input?.trim() || text;
 
-  /* chart-request safety net: a model that replies conversationally to a
-     chart request (e.g. suggesting Excel/Sheets) is overridden to chart.build —
-     the user asked for a chart, they get a chart */
-  const CHART_INTENT = /(chart|graph|pie|donut|饼图|图表|柱状图|折线图|画个?图|做个?图)/i;
-  const CHART_TOPIC = /(?:draw|make|create|build|show(?: me)?)\s+(?:a|an|me)?\s*(?:pie\s*)?(?:chart|graph|donut)\s*(?:on|of|for|about)?\s*(?:the)?\s+(.+)$/i;
-  if (CHART_INTENT.test(text) && decision.plan.length === 0) {
-    const topicMatch = text.match(CHART_TOPIC);
-    const topic = topicMatch?.[1]?.trim() ?? text.trim();
-    decision = {
-      ...decision,
-      mode: "action",
-      goal: decision.goal || "chart of " + topic,
-      capability: "chart.build",
-      plan: [
-        {
-          tool: "chart.build",
-          args: {
-            topic,
-            kind: /pie|donut|饼图|占比|percentage/i.test(text) ? "donut" : /line|trend|折线|趋势/i.test(text) ? "line" : "donut",
-          },
-        },
-      ],
-      response: "",
-      needs_clarification: false,
-    };
-  }
+  /* ---- anti-generic-clarify guard ----
+     A clarification only counts when the model actually wrote a specific
+     question. A bare flag / empty decision / empty response means the model
+     gave us nothing usable: one targeted retry, then fall through so the
+     app's deterministic engine takes over. The generic
+     "Could you say that a bit differently?" is therefore unreachable. */
+  let hasResponse = !!decision.response.trim();
+  let realClarify =
+    decision.needs_clarification && !!decision.clarification?.trim();
 
-  /* media-play safety net: a model that replies conversationally to a
-     "play X" request (e.g. "I can't stream right now, find it on YouTube")
-     is overridden to music.play / video.play — the user asked to play, they
-     get the in-app widget. Only fires when the model planned nothing. */
-  const MEDIA_PLAY = /(?:^|\s)(?:please\s+)?(?:play|play some|play the|play a|播放|放|来首|来一首|点歌|放歌|播|唱|watch)\s+/i;
-  const MUSIC_HINT = /(song|music|track|spotify|音乐|歌|单曲|曲子)/i;
-  const VIDEO_HINT = /(video|youtube|视频|影片|短片)/i;
-  const mediaPlay = MEDIA_PLAY.test(text);
-  const wantsMusic = mediaPlay && (MUSIC_HINT.test(text) || !VIDEO_HINT.test(text));
-  const wantsVideo = mediaPlay && VIDEO_HINT.test(text);
-  if ((wantsMusic || wantsVideo) && decision.plan.length === 0) {
-    const query = text.replace(MEDIA_PLAY, "").trim().replace(/[.!?。！？]+$/, "");
-    const pureRef = /^(that|this|it|the one|same|again|another|more|上一首|这个|那个|再来一次)$/i.test(query);
-    if (query && !pureRef) {
-      const tool = wantsVideo ? "video.play" : "music.play";
-      decision = {
-        ...decision,
-        mode: "action",
-        goal: decision.goal || query,
-        capability: tool,
-        plan: [{ tool, args: { query } }],
-        response: "",
-        needs_clarification: false,
-      };
+  if (decision.plan.length === 0 && !hasResponse && !realClarify) {
+    const r2 = await attempt(RETRY_HINT);
+    const d2 = r2.data ? sanitize(r2.data) : null;
+    if (
+      d2 &&
+      (d2.plan.length > 0 ||
+        d2.response.trim() ||
+        (d2.needs_clarification && d2.clarification?.trim()))
+    ) {
+      decision = d2;
+      hasResponse = !!decision.response.trim();
+      realClarify =
+        decision.needs_clarification && !!decision.clarification?.trim();
     }
   }
 
-  /* clarification: only when the AI says so (ambiguous / missing parameter) */
-  if (decision.needs_clarification || (decision.plan.length === 0 && !decision.response)) {
-    const response =
-      decision.clarification ||
-      (lang === "zh" ? "能再说清楚一点吗？" : "Could you say that a bit differently?");
-    if (settings.memoryOn) rememberExchange(settings, text, response);
+  /* genuine ambiguity -> ask the model's own specific question */
+  if (realClarify) {
+    const response = decision.clarification!.trim();
+    if (settings.memoryOn) rememberExchange(settings, saidText, response);
     updateWorkingFromDecision(decision, text);
+    updateConversationFromDecision(text, decision);
+    updateConversationResponse(response);
+    compressSessionIfNeeded();
     return {
-      kind: "clarify",
-      decision,
-      runs: [],
-      response,
-      memoryHits: retrieveContext(text, settings).items.length,
-      memorySaved,
-      decisionMs,
-      planMs: 0,
-      synthMs: 0,
-      totalMs: Math.round(performance.now() - t0),
-      context: cx,
-    };
+    kind: "clarify",
+    decision,
+    runs: [],
+    response,
+    memoryHits: retrieveContext(text, settings).items.length,
+    memorySaved,
+    decisionMs,
+    planMs: 0,
+    synthMs: 0,
+    totalMs: Math.round(performance.now() - t0),
+    context: cx,
+    cognitive: buildCognitiveDebug(text, cx, decision, [], response, memorySaved, settings, understanding),
+  };
   }
 
   /* no tools -> direct conversation reply */
   if (decision.plan.length === 0) {
     const response = decision.response;
-    if (settings.memoryOn) rememberExchange(settings, text, response);
+    if (settings.memoryOn) rememberExchange(settings, saidText, response);
     updateWorkingFromDecision(decision, text);
+    updateConversationFromDecision(text, decision);
+    updateConversationResponse(response);
+    compressSessionIfNeeded();
     return {
-      kind: "reply",
-      decision,
-      runs: [],
-      response,
-      memoryHits: retrieveContext(text, settings).items.length,
-      memorySaved,
-      decisionMs,
-      planMs: 0,
-      synthMs: 0,
-      totalMs: Math.round(performance.now() - t0),
-      context: cx,
-    };
+    kind: "reply",
+    decision,
+    runs: [],
+    response,
+    memoryHits: retrieveContext(text, settings).items.length,
+    memorySaved,
+    decisionMs,
+    planMs: 0,
+    synthMs: 0,
+    totalMs: Math.round(performance.now() - t0),
+    context: cx,
+    cognitive: buildCognitiveDebug(text, cx, decision, [], response, memorySaved, settings, understanding),
+  };
   }
 
   /* confirm-gated tools: ask once, stash the plan */
@@ -828,29 +1434,36 @@ export async function runTurn(
   if (needsConfirm) {
     pending = { plan: decision.plan, text, lang };
     const response = confirmQuestion(decision.plan, lang);
-    if (settings.memoryOn) rememberExchange(settings, text, response);
+    if (settings.memoryOn) rememberExchange(settings, saidText, response);
     updateWorkingFromDecision(decision, text);
+    updateConversationFromDecision(text, decision);
+    updateConversationResponse(response);
     return {
-      kind: "confirm",
-      decision,
-      runs: [],
-      response,
-      memoryHits: retrieveContext(text, settings).items.length,
-      memorySaved,
-      decisionMs,
-      planMs: 0,
-      synthMs: 0,
-      totalMs: Math.round(performance.now() - t0),
-      context: cx,
-    };
+    kind: "confirm",
+    decision,
+    runs: [],
+    response,
+    memoryHits: retrieveContext(text, settings).items.length,
+    memorySaved,
+    decisionMs,
+    planMs: 0,
+    synthMs: 0,
+    totalMs: Math.round(performance.now() - t0),
+    context: cx,
+    cognitive: buildCognitiveDebug(text, cx, decision, [], response, memorySaved, settings, understanding),
+  };
   }
 
   const { runs, response, synthMs } = await executePlan(decision.plan, deps, settings, names, lang, text);
   if (settings.memoryOn) {
-    rememberExchange(settings, text, response);
+    rememberExchange(settings, saidText, response);
     if (decision.mode !== "conversation") rememberRequest(settings, text, decision.goal || decision.mode);
   }
   updateWorkingFromDecision(decision, text);
+  updateConversationFromDecision(text, decision);
+  updateConversationResponse(response);
+  compressSessionIfNeeded();
+  const cognitive = buildCognitiveDebug(text, cx, decision, runs, response, memorySaved, settings, understanding);
   return {
     kind: "tools",
     decision,
@@ -863,6 +1476,7 @@ export async function runTurn(
     synthMs,
     totalMs: Math.round(performance.now() - t0),
     context: cx,
+    cognitive,
   };
 }
 
@@ -889,4 +1503,52 @@ export function refAction(
     if (tp) return { kind: "research", query: tp.text };
   }
   return null;
+}
+
+/* ---------------- developer diagnostics ---------------- */
+
+export function buildCognitiveDebug(
+  text: string,
+  cx: ContextResolution,
+  decision: TurnDecision,
+  runs: ToolRun[],
+  response: string,
+  memorySaved: string | null,
+  settings: Settings,
+  understanding?: TurnUnderstanding | null
+): CognitiveDebug {
+  const ctx = retrieveContext(text, settings);
+  const memCount = ctx.items.length;
+  const allMem = settings.memoryOn ? loadMemories() : [];
+  const excluded = allMem.length - memCount;
+  return {
+    message: text,
+    activeTask: working.task ?? null,
+    intent: decision.mode,
+    goal: decision.goal,
+    memoryNeeded: memCount > 0,
+    memoriesRetrieved: memCount,
+    memoriesExcluded: Math.max(0, excluded),
+    researchNeeded: decision.mode === "research",
+    toolNeeded: decision.plan.length > 0,
+    selectedTool: decision.plan[0]?.tool ?? null,
+    plan: runs.map((r) => `${r.tool}${r.ok ? " ✓" : r.error ? " ✗" : ""}`).join(" → ") || "(none)",
+    result: runs.filter((r) => r.ok).map((r) => r.summary || r.tool).join(", ") || "(no tool run)",
+    finalResponse: response,
+    memoryUpdate: memorySaved,
+    understanding: understanding
+      ? {
+          goal: understanding.goal,
+          intent: understanding.intent,
+          contextNeed: understanding.contextNeed,
+          memoryNeed: understanding.memoryNeed,
+          researchNeed: understanding.researchNeed,
+          toolNeed: understanding.toolNeed,
+          continuation: understanding.continuation,
+          reference: understanding.reference,
+          entities: understanding.entities,
+          confidence: understanding.confidence,
+        }
+      : undefined,
+  };
 }

@@ -139,23 +139,56 @@ export async function webSearch(query: string): Promise<ResearchSource[]> {
 }
 
 /* crawl a page with Playwright through the local agent bridge — real
-   rendered browser text, not just the search snippet. null on any failure
+   rendered browser text, not just the search snippet. Falls back to direct
+   HTTP fetch for sites that don't require JavaScript. null on any failure
    (caller keeps the snippet). */
 async function crawlSource(url: string): Promise<{ title: string; text: string } | null> {
+  // Try agent bridge first (Playwright for JS-rendered pages)
   try {
     const r = await fetch("/agent/web/crawl", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (r.ok) {
+      const j = (await r.json()) as { ok?: boolean; title?: string; text?: string };
+      if (j.ok && j.text && j.text.length > 100) {
+        return { title: j.title ?? "", text: j.text };
+      }
+    }
+  } catch {
+    // agent bridge unavailable — fall through to direct fetch
+  }
+
+  // Fallback: direct HTTP fetch for static pages (Wikipedia, blogs, news)
+  try {
+    const r = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: AbortSignal.timeout(15000),
     });
     if (!r.ok) return null;
-    const j = (await r.json()) as { ok?: boolean; title?: string; text?: string };
-    if (!j.ok || !j.text) return null;
-    return { title: j.title ?? "", text: j.text };
+    const html = await r.text();
+    // Extract text from HTML
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    // Remove scripts, styles, nav, footer
+    doc.querySelectorAll("script, style, nav, footer, header, aside, .sidebar, .nav, .menu, .advertisement, .ad").forEach((el) => el.remove());
+    const title = doc.querySelector("title")?.textContent?.trim() ?? "";
+    // Get main content first, fall back to body
+    const main = doc.querySelector("main, article, .content, .post, .entry, #content, .mw-parser-output");
+    const text = (main?.textContent ?? doc.body?.textContent ?? "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 6000);
+    if (text.length > 100) return { title, text };
   } catch {
-    return null;
+    // direct fetch failed too
   }
+  return null;
 }
 
 /* ---------------- synthesis ---------------- */
@@ -209,15 +242,27 @@ async function llmSynthesis(
   sources: ResearchSource[],
   question: string,
   lang: Lang,
-  settings: Settings
+  settings: Settings,
+  mode: ResearchMode = "search"
 ): Promise<Synthesis | null> {
   const evidence = sources
-    .slice(0, 6)
+    .slice(0, 8)
     .map(
       (s, i) =>
-        `${i + 1}. [${s.domain}] ${truncate(s.name, 120)}\n   ${truncate(s.excerpt, 800)}`
+        `${i + 1}. [${s.domain}] ${truncate(s.name, 120)}${s.crawled ? " [FULL TEXT]" : ""}\n   ${truncate(s.excerpt, 1200)}`
     )
     .join("\n");
+  const crawledCount = sources.filter((s) => s.crawled).length;
+  
+  // Mode-specific synthesis instructions
+  const modeInstructions: Record<ResearchMode, string> = {
+    search: "Synthesize a clear, accurate answer from the evidence.",
+    news: "Focus on recent events, dates, and developments. Prioritize timeliness.",
+    research: "Provide comprehensive analysis with background context, key facts, and nuances.",
+    price: "Extract specific prices, availability, and purchasing information.",
+    compare: "Create a structured comparison with specific data points for each item.",
+  };
+  
   const out = await llmJson<{
     overview?: string;
     facts?: string[];
@@ -228,9 +273,17 @@ async function llmSynthesis(
     confidence_reason?: string;
   }>(
     settings,
-    "Research analyst. Answer ONLY from the given evidence. If evidence is insufficient, say so. Distinguish established facts from uncertain claims.",
-    `Question: ${question}\nLanguage: ${lang === "zh" ? "Chinese" : "English"}\nEvidence:\n${evidence}\nReturn JSON: {"overview":"concise factual overview (2-4 sentences)","facts":["key facts with dates where present, 4-6 items"],"uncertain":["claims needing verification"],"relevance":0-100,"coverage":0-100,"confidence":0-100,"confidence_reason":"short"}`,
-    { purpose: "research_synthesis", strong: true, maxTokens: 700, temperature: 0.2 }
+    `Research analyst. ${modeInstructions[mode]} Extract specific details, dates, numbers, and names. Distinguish established facts from uncertain claims. Prioritize full-text crawled sources over search snippets.`,
+    `Question: ${question}
+Language: ${lang === "zh" ? "Chinese" : "English"}
+Mode: ${mode}
+Sources: ${sources.length} total, ${crawledCount} fully crawled
+
+Evidence:
+${evidence}
+
+Return JSON: {"overview":"detailed factual overview (3-5 sentences)","facts":["specific facts with dates/numbers/names, 6-10 items"],"uncertain":["claims needing verification"],"relevance":0-100,"coverage":0-100,"confidence":0-100,"confidence_reason":"brief reason"}`,
+    { purpose: "research_synthesis", strong: true, maxTokens: 900, temperature: 0.2 }
   );
   if (!out) return null;
   return {
@@ -246,17 +299,49 @@ async function llmSynthesis(
 
 /* ---------------- pipeline ---------------- */
 
+export type ResearchMode = "search" | "news" | "research" | "price" | "compare";
+
 export interface ResearchCtx {
   text: string;
   lang: Lang;
   settings: Settings;
   followUp: boolean;
+  mode: ResearchMode;
+  compareItems?: string[];
+  compareAspect?: string;
   isCurrent: () => boolean;
   onLog: (text: string, kind?: "step" | "source" | "done" | "error") => void;
 }
 
+/* generate search queries based on research mode */
+function buildSearchQueries(topic: string, mode: ResearchMode, lang: Lang, compareItems?: string[]): string[] {
+  const suffix = lang === "zh" ? "详细 最新" : "detailed latest";
+  switch (mode) {
+    case "news":
+      return lang === "zh"
+        ? [`${topic} 最新新闻`, `${topic} 今天`]
+        : [`${topic} latest news today`, `${topic} recent developments`];
+    case "price":
+      return lang === "zh"
+        ? [`${topic} 价格 多少钱`, `${topic} 购买`]
+        : [`${topic} price cost buy`, `${topic} current price 2025`];
+    case "compare":
+      if (compareItems && compareItems.length >= 2) {
+        return [`${compareItems.join(" vs ")} comparison`];
+      }
+      return [topic];
+    case "research":
+      return lang === "zh"
+        ? [`${topic} 详细介绍`, `${topic} 背景 历史`, `${topic} 最新发展`]
+        : [`${topic} comprehensive overview`, `${topic} background history`, `${topic} latest developments`];
+    case "search":
+    default:
+      return [topic, `${topic} ${suffix}`];
+  }
+}
+
 export async function researchTopic(ctx: ResearchCtx): Promise<ResearchResult | null> {
-  const { text, lang, settings, followUp, isCurrent, onLog } = ctx;
+  const { text, lang, settings, followUp, mode, compareItems, compareAspect, isCurrent, onLog } = ctx;
 
   /* 1. memory retrieval */
   const mem = retrieveContext(text, settings);
@@ -295,8 +380,8 @@ export async function researchTopic(ctx: ResearchCtx): Promise<ResearchResult | 
   if (!sources.length) {
     if (!topic) topic = text;
     if (!isCurrent()) return null;
-    onLog(lang === "en" ? `Searching: "${topic}"` : `正在搜索：「${topic}」`);
-    const queries = [topic, lang === "zh" ? `${topic} 历史 时间` : `${topic} history dates`];
+    onLog(lang === "en" ? `Searching (${mode}): "${topic}"` : `正在搜索（${mode}）：「${topic}」`);
+    const queries = buildSearchQueries(topic, mode, lang, compareItems);
     for (const q of queries) {
       if (!isCurrent()) return null;
       try {
@@ -339,19 +424,22 @@ export async function researchTopic(ctx: ResearchCtx): Promise<ResearchResult | 
       : `证据：${sources.length} 个来源，来自 ${domains} 个域名`
   );
 
-  /* 4b. crawl the top sources with a real browser (Playwright via the local
-     agent bridge) — rendered page text is much richer evidence than the
-     search snippets; failures fall back to the snippet */
+  /* 4b. crawl sources with a real browser (Playwright via agent bridge + direct
+     fetch fallback) — rendered page text is much richer evidence than the
+     search snippets. Crawl up to 6 sources for deeper research. Failures fall
+     back to the snippet. */
   if (!followUp) {
-    onLog(lang === "en" ? "Crawling top sources in a real browser…" : "正在用真实浏览器抓取主要来源…");
-    const top = sources.slice(0, 4);
+    onLog(lang === "en" ? "Crawling sources in a real browser…" : "正在用真实浏览器抓取来源…");
+    const top = sources.slice(0, 6);
     const crawls = await Promise.all(top.map((s) => crawlSource(s.url)));
+    let crawledCount = 0;
     for (let i = 0; i < top.length; i++) {
       if (!isCurrent()) return null;
       const c = crawls[i];
-      if (c && c.text.trim()) {
-        top[i].excerpt = truncate(c.text, 1200);
+      if (c && c.text.trim().length > 50) {
+        top[i].excerpt = truncate(c.text, 1500);
         top[i].crawled = true;
+        crawledCount++;
         onLog(
           lang === "en"
             ? `Crawled: ${top[i].domain} — ${truncate(c.title, 80)}`
@@ -361,19 +449,25 @@ export async function researchTopic(ctx: ResearchCtx): Promise<ResearchResult | 
       } else {
         onLog(
           lang === "en"
-            ? `Crawl failed: ${top[i].domain} — using search snippet`
-            : `抓取失败：${top[i].domain} — 使用搜索摘要`,
-          "error"
+            ? `Snippet only: ${top[i].domain}`
+            : `仅摘要：${top[i].domain}`,
+          "source"
         );
       }
     }
+    onLog(
+      lang === "en"
+        ? `Deep research: ${crawledCount}/${top.length} sources crawled`
+        : `深度研究：已抓取 ${crawledCount}/${top.length} 个来源`,
+      "step"
+    );
     if (!isCurrent()) return null;
   }
 
   /* 5. synthesis — AI if available, else local extraction */
   const question = followUp ? text : topic;
   const tokens = queryTokens(topic);
-  let syn = await llmSynthesis(sources, question, lang, settings);
+  let syn = await llmSynthesis(sources, question, lang, settings, mode);
   if (syn) onLog(lang === "en" ? "AI synthesis complete." : "AI 综合完成。");
   else {
     syn = localSynthesis(sources, question, tokens);
@@ -402,7 +496,7 @@ export async function researchTopic(ctx: ResearchCtx): Promise<ResearchResult | 
     max: 100,
   };
 
-  /* 7. final answer */
+  /* 7. final answer — concise for chat (sources shown in research panel) */
   const lines = [syn.overview];
   if (syn.facts.length) {
     lines.push(lang === "en" ? "Key facts:" : "关键事实：");
@@ -413,11 +507,7 @@ export async function researchTopic(ctx: ResearchCtx): Promise<ResearchResult | 
     lines.push(...syn.uncertain.map((u) => `• ${u}`));
   }
   if (syn.confidenceReason) lines.push(`— ${syn.confidenceReason}`);
-  lines.push(
-    lang === "en"
-      ? `Based on ${sources.length} source(s) from ${domains} domain(s).`
-      : `基于 ${sources.length} 个来源、${domains} 个域名。`
-  );
+  // Note: no "Based on N sources" line — sources are shown in the research panel
   const answer = lines.join("\n");
   const summary = lang === "en" ? `Synthesis from ${sources.length} real sources` : `基于 ${sources.length} 个真实来源的综合`;
 

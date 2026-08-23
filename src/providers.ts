@@ -16,6 +16,8 @@ export interface Settings {
   masterName: string;
   memoryOn: boolean;
   providers: Record<ProviderId, ProviderCfg>;
+  audioInputDeviceId?: string | null;
+  audioOutputDeviceId?: string | null;
 }
 
 export interface ProviderInfo {
@@ -32,23 +34,24 @@ export const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
     name: "Groq",
     priority: 1,
     baseUrl: "https://api.groq.com/openai/v1",
-    /* llama-3.3-70b-versatile is retired; these are the live text models
-       (gpt-oss-20b is the cheapest — Groq has no free text tier anymore) */
-    defaultModels: ["openai/gpt-oss-20b", "openai/gpt-oss-120b"],
+    /* gpt-oss-120b: free tier, reasoning model, 120B params, tool calling */
+    defaultModels: ["openai/gpt-oss-120b"],
   },
   gemini: {
     id: "gemini",
     name: "Gemini",
     priority: 2,
     baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-    defaultModels: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    /* gemini-3.5-flash-lite: free tier, fast, tool calling, structured output */
+    defaultModels: ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"],
   },
   mistral: {
     id: "mistral",
     name: "Mistral",
     priority: 3,
     baseUrl: "https://api.mistral.ai/v1",
-    defaultModels: ["mistral-small-latest", "open-mistral-nemo", "mistral-medium-latest"],
+    /* DISABLED: mistral-small-4 is paid-only, no free tier available */
+    defaultModels: [],
   },
 };
 
@@ -196,8 +199,12 @@ const rawErr = (e: unknown): string => (e instanceof Error ? e.message : String(
 
 /* reasoning-class models dump chain-of-thought into content and can starve
    the JSON out of the token budget — disable reasoning for them where the
-   provider supports the flag (OpenAI-compatible endpoints) */
+   provider supports the flag (OpenAI-compatible endpoints ONLY).
+   Groq does NOT support the reasoning parameter — never send it there. */
 const REASONING_MODEL = /nemotron|gpt-oss|r1|reasoner|thinking|qwq|kimi-k2|glm-4\.5|o[13]-|o[13]$/i;
+
+/* providers that support the `reasoning` parameter */
+const REASONING_SUPPORTED_PROVIDERS = new Set<ProviderId>(["gemini"]);
 
 /* ---------------- provider health ---------------- */
 
@@ -259,7 +266,14 @@ async function openAICompatChat(
     temperature: opts.temperature ?? 0.4,
     max_tokens: opts.maxTokens ?? 300,
   };
-  if (REASONING_MODEL.test(model)) body.reasoning = { enabled: false };
+  /* GPT-OSS on Groq: reasoning arrives in a SEPARATE message.reasoning field
+     and eats the completion budget — cap it low so `content` survives */
+  if (model.includes("gpt-oss")) {
+    body.reasoning_effort = "low";
+  }
+  if (REASONING_MODEL.test(model) && REASONING_SUPPORTED_PROVIDERS.has(id)) {
+    body.reasoning = { enabled: false };
+  }
   if (opts.json) body.response_format = { type: "json_object" };
   let r: Response;
   try {
@@ -297,9 +311,12 @@ async function openAICompatChat(
     trace({ purpose: opts.purpose ?? "chat", ...reqSummary, model, in: estTokens(system + user), out: 0, ms: Math.round(performance.now() - t0), status: "HTTP 200", error: err.message });
     return { ok: false, err };
   }
-  const choices = (data as { choices?: { message?: { content?: unknown } }[] }).choices;
-  const content = choices?.[0]?.message?.content;
-  if (typeof content !== "string" || !content.trim()) {
+  const choices = (data as { choices?: { message?: { content?: unknown; reasoning?: unknown } }[] }).choices;
+  const msg = choices?.[0]?.message;
+  /* content first; gpt-oss reasoning models may leave the answer in `reasoning` */
+  let content = typeof msg?.content === "string" ? msg.content : "";
+  if (!content.trim() && typeof msg?.reasoning === "string") content = msg.reasoning;
+  if (!content.trim()) {
     const err: LlmError = { type: "empty_response", provider: id, message: "Model replied without usable content" };
     trace({ purpose: opts.purpose ?? "chat", ...reqSummary, model, in: estTokens(system + user), out: 0, ms: Math.round(performance.now() - t0), status: "HTTP 200", error: err.message });
     return { ok: false, err };
@@ -419,6 +436,8 @@ export async function routeChat(s: Settings, system: string, user: string, opts:
   let lastErr: LlmError | null = null;
   for (const id of PROVIDER_ORDER) {
     if (!providerCfg(s, id).key.trim()) continue;
+    /* skip disabled providers (empty defaultModels = disabled) */
+    if (PROVIDER_INFO[id].defaultModels.length === 0) continue;
     if (inCooldown(id)) {
       lastErr = { type: "server_error", provider: id, message: `${PROVIDER_INFO[id].name} is in cooldown (recent failures) — skipped.` };
       continue;
@@ -622,6 +641,17 @@ export async function testAllProviders(s: Settings): Promise<ProviderTestResult[
   const results: ProviderTestResult[] = [];
   for (const id of PROVIDER_ORDER) {
     const cfg = providerCfg(s, id);
+    /* skip disabled providers */
+    if (PROVIDER_INFO[id].defaultModels.length === 0) {
+      results.push({
+        id,
+        name: PROVIDER_INFO[id].name,
+        priority: PROVIDER_INFO[id].priority,
+        ok: false,
+        error: { type: "configuration_error", provider: id, message: "Provider disabled (no free models available)." },
+      });
+      continue;
+    }
     if (!cfg.key.trim()) {
       results.push({
         id,

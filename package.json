@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -k -n VITE,STT -c green,cyan \"vite\" \"C:\\Users\\mirun\\AppData\\Local\\Programs\\Python\\Python313\\python.exe stt_server.py\"",
+    "dev:vite": "vite",
+    "dev:stt": "C:\\Users\\mirun\\AppData\\Local\\Programs\\Python\\Python313\\python.exe stt_server.py",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "agent": "node tools/agent/server.mjs"
@@ -19,6 +21,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^10.0.5",
     "typescript": "^5.6.3",
     "vite": "^6.0.5"
   }

@@ -15,6 +15,7 @@ import {
   truncate,
   type Settings,
 } from "./memory";
+import type { ResearchMode } from "./research";
 import type { ResearchResult } from "./engine";
 
 export interface ToolDeps {
@@ -22,7 +23,7 @@ export interface ToolDeps {
   settings: Settings;
   userText: string;
   performOpen: (kind: "youtube" | "music", query: string, lang: "en" | "zh") => { query: string; kind: "video" | "music" };
-  startResearch: (raw: string, lang: "en" | "zh", followUp: boolean, silent: boolean) => Promise<ResearchResult | null>;
+  startResearch: (raw: string, lang: "en" | "zh", followUp: boolean, silent: boolean, mode?: ResearchMode) => Promise<ResearchResult | null>;
   stopAll: (lang: "en" | "zh") => void;
 }
 
@@ -63,9 +64,8 @@ export interface MediaTrack {
   title: string;
   artist: string;
   artwork: string;
-  previewUrl: string;
-  url: string;
-  provider: "youtube" | "spotify" | "itunes";
+  videoId: string;
+  thumbnail: string;
 }
 export interface MediaItem {
   query: string;
@@ -76,51 +76,65 @@ export interface MediaItem {
   embedUrl?: string;
 }
 
-export async function itunesTrack(q: string): Promise<MediaTrack | null> {
+/* search YouTube Music for audio (songs, podcasts, playlists) */
+export async function youtubeMusicSearch(q: string): Promise<MediaTrack | null> {
   try {
-    const r = await fetch(
-      `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&limit=5&entity=song`
-    );
-    const d = (await r.json()) as {
-      results?: { trackName?: string; artistName?: string; artworkUrl100?: string; previewUrl?: string; trackViewUrl?: string }[];
-    };
-    const t = d.results?.[0];
-    if (!t) return null;
+    // Use the vite proxy at /ytm (proxies to music.youtube.com)
+    const searchUrl = `/ytm/search?q=${encodeURIComponent(q)}`;
+    const r = await fetch(searchUrl, {
+      headers: {
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+    if (!r.ok) return null;
+    const html = await r.text();
+    // Extract first video ID from search results
+    const match = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+    if (!match) return null;
+    const videoId = match[1];
+    // Get video title
+    const titleMatch = html.match(/{"title":{"runs":\[{"text":"([^"]+)"/);
+    const title = titleMatch ? titleMatch[1].replace(/\\u0026/g, "&") : q;
+    const artistMatch = html.match(/{"text":"([^"]+)","navigationEndpoint":\{"clickTrackingParams":"[^"]+","commandMetadata":\{"webCommandMetadata":\{"url":\/channel/);
+    const artist = artistMatch ? artistMatch[1] : "";
     return {
-      title: t.trackName ?? q,
-      artist: t.artistName ?? "",
-      artwork: t.artworkUrl100 ?? "",
-      previewUrl: t.previewUrl ?? "",
-      url: t.trackViewUrl ?? "",
-      provider: "itunes",
+      title,
+      artist,
+      artwork: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      videoId,
+      thumbnail: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
     };
   } catch {
     return null;
   }
 }
 
-export async function itunesPlaylist(q: string): Promise<MediaTrack[] | null> {
+/* search YouTube for video content */
+export async function youtubeVideoSearch(q: string): Promise<MediaTrack | null> {
   try {
-    const s = await fetch(
-      `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=album&limit=1`
-    );
-    const sd = (await s.json()) as { results?: { collectionId?: number; collectionName?: string; artworkUrl100?: string; collectionViewUrl?: string }[] };
-    const album = sd.results?.[0];
-    if (!album?.collectionId) return null;
-    const l = await fetch(`https://itunes.apple.com/lookup?id=${album.collectionId}&entity=song`);
-    const ld = (await l.json()) as {
-      results?: { wrapperType?: string; trackName?: string; artistName?: string; previewUrl?: string; artworkUrl100?: string; trackViewUrl?: string }[];
+    // Use the vite proxy at /yt (proxies to www.youtube.com)
+    const searchUrl = `/yt/results?search_query=${encodeURIComponent(q)}`;
+    const r = await fetch(searchUrl, {
+      headers: {
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+    if (!r.ok) return null;
+    const html = await r.text();
+    const match = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+    if (!match) return null;
+    const videoId = match[1];
+    const titleMatch = html.match(/{"title":{"runs":\[{"text":"([^"]+)"/);
+    const title = titleMatch ? titleMatch[1].replace(/\\u0026/g, "&") : q;
+    const artistMatch = html.match(/{"text":"([^"]+)","navigationEndpoint":\{"clickTrackingParams":"[^"]+","commandMetadata":\{"webCommandMetadata":\{"url":\/channel/);
+    const artist = artistMatch ? artistMatch[1] : "";
+    return {
+      title,
+      artist,
+      artwork: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      videoId,
+      thumbnail: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
     };
-    const tracks = (ld.results ?? []).filter((t) => t.wrapperType === "track" && t.previewUrl);
-    if (tracks.length === 0) return null;
-    return tracks.slice(0, 10).map((t) => ({
-      title: t.trackName ?? "Unknown",
-      artist: t.artistName ?? "",
-      artwork: t.artworkUrl100 ?? album.artworkUrl100 ?? "",
-      previewUrl: t.previewUrl ?? "",
-      url: t.trackViewUrl ?? album.collectionViewUrl ?? "",
-      provider: "itunes",
-    }));
   } catch {
     return null;
   }
@@ -260,7 +274,64 @@ const TOOLS: ToolDef[] = [
     },
   },
 
-  /* ---------------- in-app tools ---------------- */
+  {
+    name: "browser.navigate",
+    desc: "open a URL in the browser for viewing or interaction. Use when the user wants to see a website, open a link, or view content that requires a real page",
+    permission: "auto",
+    run: async (args) => {
+      const url = String(args.url ?? "").trim();
+      if (!url) return { ok: false, error: "no url provided", unsupported: true };
+      const res = await callAgent("browser.navigate", { url });
+      return res;
+    },
+    render: (d) => {
+      const r = d as { url: string };
+      return `opened browser: ${s80(r.url)}`;
+    },
+  },
+  {
+    name: "browser.extract",
+    desc: "extract readable text from a web page. Use when the user wants the content, text, or information from a specific URL — returns the page's text for analysis",
+    permission: "auto",
+    run: async (args) => {
+      const url = String(args.url ?? "").trim();
+      if (!url) return { ok: false, error: "no url provided", unsupported: true };
+      try {
+        const r = await fetch("/agent/web/crawl", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url }),
+          signal: AbortSignal.timeout(30000),
+        });
+        if (!r.ok) return { ok: false, error: `fetch failed: ${r.status}`, unsupported: true };
+        const j = (await r.json()) as { ok?: boolean; title?: string; text?: string };
+        if (!j.ok || !j.text) return { ok: false, error: "could not extract page content", unsupported: true };
+        return { ok: true, data: { url, title: j.title ?? "", text: j.text.slice(0, 8000) }, summary: `extracted ${j.text.length} chars from ${j.title || url}` };
+      } catch (e) {
+        return { ok: false, error: `crawl failed: ${e instanceof Error ? e.message : "network error"}`, unsupported: true };
+      }
+    },
+    render: (d) => {
+      const r = d as { url: string; title: string; text: string };
+      return `extracted "${s80(r.title || r.url)}" (${r.text.length} chars)`;
+    },
+  },
+  {
+    name: "browser.search",
+    desc: "search the web using a browser. Use when web.search is insufficient and you need rendered results, JavaScript-heavy pages, or interaction with search engines",
+    permission: "auto",
+    run: async (args, deps) => {
+      const q = String(args.query ?? "").trim();
+      if (!q) return { ok: false, error: "no query", unsupported: true };
+      const res = await deps.startResearch(q, deps.lang, false, true);
+      if (!res) return { ok: false, error: "search failed", unsupported: true };
+      return { ok: true, data: { topic: res.topic, answer: res.answer, sources: res.sources.map((s) => s.name) } };
+    },
+    render: (d) => {
+      const r = d as { topic: string; answer: string; sources: string[] };
+      return `browser search: ${s80(r.topic)} — ${r.sources.length} source(s)`;
+    },
+  },
 
   {
     name: "web.search",
@@ -294,45 +365,51 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "music.play",
-    desc: "play music or a playlist (opens Spotify, shows the song/playlist in a widget)",
+    desc: "search and play music through the Rooki YouTube Music player. Use when the user wants to listen to a song, artist, playlist, or genre — loads the result into the music widget and autoplays",
     permission: "auto",
     run: async (args, deps) => {
       const q = String(args.query ?? "").trim();
       if (!q) return { ok: false, error: "no query", unsupported: true };
       deps.performOpen("music", q, deps.lang);
-      const isPlaylist = /playlist|歌单|播放列表|专辑|album/i.test(q);
-      const playlist = isPlaylist ? await itunesPlaylist(q) : null;
-      const track = playlist ? null : await itunesTrack(q);
-      if (!track && !playlist)
-        return { ok: false, error: "could not find that on the music service", unsupported: true };
-      return { ok: true, data: { query: q, kind: "music", action: "opened", track, playlist } as MediaItem };
+      // Search YouTube Music for the song
+      const track = await youtubeMusicSearch(q);
+      return {
+        ok: true,
+        data: { query: q, kind: "music", action: "playing", track } as MediaItem,
+      };
     },
     render: (d) => {
-      const r = d as { query: string; kind: string; action: string };
-      return `${r.action} music search for "${s80(r.query)}"`;
+      const r = d as { query: string; kind: string; action: string; track?: MediaTrack | null };
+      return r.track ? `${r.action} music: "${r.track.title}" by ${r.track.artist}` : `${r.action} music: "${s80(r.query)}"`;
     },
   },
   {
     name: "video.play",
-    desc: "play a video (opens YouTube, plays the top result in a widget)",
+    desc: "search and play a video through the Rooki YouTube player. Use when the user wants to watch a video, music video, tutorial, or any YouTube content — loads the result into the video widget and autoplays",
     permission: "auto",
     run: async (args, deps) => {
       const q = String(args.query ?? "").trim();
       if (!q) return { ok: false, error: "no query", unsupported: true };
       deps.performOpen("youtube", q, deps.lang);
+      // Search YouTube for the video
+      const track = await youtubeVideoSearch(q);
+      const videoId = track?.videoId ?? "";
       return {
         ok: true,
         data: {
           query: q,
           kind: "video",
-          action: "opened",
-          embedUrl: `https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(q)}`,
+          action: "playing",
+          track,
+          embedUrl: videoId
+            ? `https://www.youtube.com/embed/${videoId}?autoplay=1`
+            : `https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(q)}`,
         } as MediaItem,
       };
     },
     render: (d) => {
-      const r = d as { query: string; kind: string; action: string };
-      return `${r.action} video search for "${s80(r.query)}"`;
+      const r = d as { query: string; kind: string; action: string; track?: MediaTrack | null };
+      return r.track ? `${r.action} video: "${r.track.title}"` : `${r.action} video: "${s80(r.query)}"`;
     },
   },
   {

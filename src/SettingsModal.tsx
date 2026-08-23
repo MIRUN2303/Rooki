@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   anyProviderConfigured,
   fetchModelsFor,
@@ -11,6 +11,7 @@ import {
   type ProviderTestResult,
   type Settings,
 } from "./memory";
+import { enumerateAudioInputDevices, enumerateAudioOutputDevices, isOutputDeviceSupported, setInputDeviceId, setOutputDeviceId, getInputDeviceId } from "./voice";
 
 interface Props {
   open: boolean;
@@ -25,6 +26,24 @@ export default function SettingsModal({ open, settings, onChange, onClose, onCle
   const [testing, setTesting] = useState<ProviderId | "all" | null>(null);
   const [modelLists, setModelLists] = useState<Partial<Record<ProviderId, string[]>>>({});
   const [notes, setNotes] = useState<Partial<Record<ProviderId, string>>>({});
+  const [inputDevices, setInputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [outputDevices, setOutputDevices] = useState<MediaDeviceInfo[]>([]);
+
+  const refreshDevices = useCallback(async () => {
+    const [inputs, outputs] = await Promise.all([
+      enumerateAudioInputDevices(),
+      enumerateAudioOutputDevices(),
+    ]);
+    setInputDevices(inputs);
+    setOutputDevices(outputs);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    refreshDevices();
+    navigator.mediaDevices.addEventListener("devicechange", refreshDevices);
+    return () => navigator.mediaDevices.removeEventListener("devicechange", refreshDevices);
+  }, [open, refreshDevices]);
 
   useEffect(() => {
     if (!open) return;
@@ -160,6 +179,52 @@ export default function SettingsModal({ open, settings, onChange, onClose, onCle
             <button className="set-btn danger" onClick={onClearMemory}>
               Clear memory
             </button>
+          </div>
+
+          <div className="set-group">
+            <span className="set-group-title">Audio</span>
+            <label className="set-field">
+              <span>Input Device</span>
+              <select
+                value={settings.audioInputDeviceId || ""}
+                onChange={(e) => {
+                  const deviceId = e.target.value || null;
+                  onChange({ ...settings, audioInputDeviceId: deviceId ?? undefined });
+                  setInputDeviceId(deviceId);
+                }}
+              >
+                <option value="">Default</option>
+                {inputDevices.map((d) => (
+                  <option key={d.deviceId} value={d.deviceId}>
+                    {d.label || `Microphone ${inputDevices.indexOf(d) + 1}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="set-field">
+              <span>Output Device</span>
+              <select
+                value={settings.audioOutputDeviceId || ""}
+                disabled={!isOutputDeviceSupported()}
+                onChange={(e) => {
+                  const deviceId = e.target.value || null;
+                  onChange({ ...settings, audioOutputDeviceId: deviceId ?? undefined });
+                  setOutputDeviceId(deviceId);
+                }}
+              >
+                <option value="">Default</option>
+                {outputDevices.map((d) => (
+                  <option key={d.deviceId} value={d.deviceId}>
+                    {d.label || `Speaker ${outputDevices.indexOf(d) + 1}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {!isOutputDeviceSupported() && (
+              <p className="set-hint">
+                Output device selection isn't supported by this browser.
+              </p>
+            )}
           </div>
 
           <div className="set-group">

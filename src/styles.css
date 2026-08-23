@@ -2034,3 +2034,749 @@ canvas {
   box-shadow: 0 0 10px var(--label-color, #a78bfa);
   transition: width 70ms linear;
 }
+
+/* ============================================================
+   Custom Dropdown/Select — Audio Device Selectors
+   ============================================================ */
+
+.set-field select {
+  appearance: none;
+  background: rgba(10, 8, 22, 0.6);
+  border: 1px solid rgba(124, 92, 255, 0.24);
+  border-radius: 10px;
+  color: var(--ink);
+  font-size: 13px;
+  font-family: var(--font-monexa);
+  padding: 9px 40px 9px 12px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a78bfa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px;
+  padding-right: 40px;
+  transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+}
+
+.set-field select:hover:not(:disabled) {
+  border-color: rgba(167, 139, 250, 0.5);
+  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.3);
+}
+
+.set-field select:focus {
+  border-color: rgba(167, 139, 250, 0.6);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.25);
+  outline: none;
+}
+
+.set-field select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: rgba(10, 8, 22, 0.4);
+  border-color: rgba(124, 92, 255, 0.12);
+}
+
+.set-field select option {
+  background: var(--bg1);
+  color: var(--ink);
+  padding: 8px 12px;
+}
+
+/* Custom dropdown arrow for WebKit */
+.set-field select::-webkit-scrollbar {
+  width: 6px;
+}
+
+.set-field select::-webkit-scrollbar-track {
+  background: var(--bg0);
+}
+
+.set-field select::-webkit-scrollbar-thumb {
+  background: rgba(124, 92, 255, 0.3);
+  border-radius: 3px;
+}
+
+.set-field select::-webkit-scrollbar-thumb:hover {
+  background: rgba(124, 92, 255, 0.5);
+}
+
+/* Firefox dropdown styling */
+@-moz-document url-prefix() {
+  .set-field select {
+    padding-right: 12px;
+    background-image: none;
+  }
+}
+
+/* Focus-visible for accessibility */
+.set-field select:focus-visible {
+  border-color: rgba(167, 139, 250, 0.8);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.3);
+}
+
+/* Animation for dropdown open */
+@keyframes dropdown-fade {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.set-field select {
+  animation: dropdown-fade var(--t-fast) var(--ease-out);
+}
+
+/* ============================================================
+   BOOT — cinematic HUD core (style-only layer)
+   ============================================================ */
+.boot-screen {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-grain);
+  overflow: hidden;
+  background: #020106;
+  display: grid;
+  place-items: center;
+  transition: opacity 0.8s var(--ease-out), filter 0.8s var(--ease-out);
+}
+.boot-screen.leaving {
+  opacity: 0;
+  filter: blur(14px) brightness(1.6);
+  pointer-events: none;
+}
+
+/* ---- atmosphere layers ---- */
+.boot-atmo {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.boot-atmo.a1 {
+  width: 90vmax; height: 90vmax;
+  left: -20vmax; top: -30vmax;
+  background: radial-gradient(circle, rgba(76, 29, 149, 0.16), transparent 62%);
+  filter: blur(40px);
+}
+.boot-atmo.a2 {
+  width: 80vmax; height: 80vmax;
+  right: -25vmax; bottom: -30vmax;
+  background: radial-gradient(circle, rgba(8, 47, 73, 0.2), transparent 60%);
+  filter: blur(50px);
+}
+.boot-atmo.a3 {
+  width: 60vmin; height: 60vmin;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.12), transparent 55%);
+  filter: blur(30px);
+  animation: boot-breathe 7s ease-in-out infinite;
+}
+@keyframes boot-breathe {
+  0%, 100% { opacity: 0.7; transform: translate(-50%, -50%) scale(1); }
+  50% { opacity: 1; transform: translate(-50%, -50%) scale(1.08); }
+}
+
+.boot-grid {
+  position: absolute;
+  inset: -2px;
+  background-image:
+    linear-gradient(rgba(167, 139, 250, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(167, 139, 250, 0.04) 1px, transparent 1px);
+  background-size: 52px 52px;
+  mask-image: radial-gradient(closest-side at 50% 48%, black 20%, transparent 92%);
+  animation: boot-grid-drift 18s linear infinite;
+}
+@keyframes boot-grid-drift {
+  to { background-position: 52px 52px, 52px 52px; }
+}
+
+/* fine scanlines over everything, very faint */
+.boot-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.014) 0 1px,
+    transparent 1px 4px
+  );
+  pointer-events: none;
+}
+
+.boot-scan {
+  position: absolute;
+  left: 0; right: 0;
+  height: 140px;
+  top: -160px;
+  background: linear-gradient(180deg, transparent, rgba(103, 232, 249, 0.05), transparent);
+  animation: boot-scan 6s var(--ease-out) infinite;
+}
+@keyframes boot-scan {
+  0% { transform: translateY(0); opacity: 0; }
+  10% { opacity: 1; }
+  100% { transform: translateY(calc(100vh + 320px)); opacity: 0; }
+}
+
+/* micro particles drifting toward the core */
+.boot-mote {
+  position: absolute;
+  width: 3px; height: 3px;
+  border-radius: 50%;
+  background: rgba(167, 199, 250, 0.85);
+  box-shadow: 0 0 6px rgba(103, 232, 249, 0.9);
+  opacity: 0;
+  animation: boot-mote-fly 7s linear infinite;
+}
+.boot-mote.m0 { left: 8%;  top: 12%; --tx: 42vw; --ty: 38vh; animation-delay: 0s; }
+.boot-mote.m1 { right: 10%; top: 8%;  --tx: -44vw; --ty: 40vh; animation-delay: 0.9s; }
+.boot-mote.m2 { left: 4%;  bottom: 16%; --tx: 46vw; --ty: -34vh; animation-delay: 1.7s; width: 2px; height: 2px; }
+.boot-mote.m3 { right: 5%; bottom: 10%; --tx: -45vw; --ty: -36vh; animation-delay: 2.6s; }
+.boot-mote.m4 { left: 30%; top: 4%;  --tx: 20vw; --ty: 44vh; animation-delay: 3.4s; width: 2px; height: 2px; }
+.boot-mote.m5 { right: 28%; bottom: 5%; --tx: -22vw; --ty: -42vh; animation-delay: 4.1s; }
+.boot-mote.m6 { left: 15%; top: 55%; --tx: 34vw; --ty: -8vh; animation-delay: 4.9s; width: 2px; height: 2px; }
+.boot-mote.m7 { right: 16%; top: 48%; --tx: -33vw; --ty: 4vh; animation-delay: 5.6s; }
+.boot-mote.m8 { left: 45%; top: 90%; --tx: 4vw; --ty: -40vh; animation-delay: 6.2s; width: 2px; height: 2px; }
+.boot-mote.m9 { right: 44%; top: 6%;  --tx: -5vw; --ty: 42vh; animation-delay: 6.8s; width: 2px; height: 2px; }
+@keyframes boot-mote-fly {
+  0%   { transform: translate(0, 0) scale(1); opacity: 0; }
+  8%   { opacity: 0.9; }
+  70%  { opacity: 0.55; }
+  100% { transform: translate(var(--tx), var(--ty)) scale(0.2); opacity: 0; }
+}
+
+/* ---- corner energy injection (kept PCB svg, retuned skin) ---- */
+.boot-pcb { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.boot-trace-base {
+  fill: none;
+  stroke: rgba(167, 139, 250, 0.13);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.boot-pulse {
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+  stroke: #8be9ff;
+  filter: drop-shadow(0 0 5px rgba(103, 232, 249, 0.95)) blur(0.4px);
+  stroke-dasharray: 0.1 1;
+  opacity: 0;
+  animation: boot-trace-flow 3.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+}
+.boot-pulse.p2 { animation-delay: 0.5s; }
+.boot-pulse.p3 { animation-delay: 1s; }
+.boot-pulse.p4 { animation-delay: 1.5s; }
+.boot-pulse.p5 { animation-delay: 2s; }
+.boot-pulse.p6 { animation-delay: 2.5s; }
+@keyframes boot-trace-flow {
+  0%   { stroke-dashoffset: 1.1; opacity: 0; }
+  10%  { opacity: 1; }
+  80%  { opacity: 0.9; }
+  94%  { opacity: 0; }
+  100% { stroke-dashoffset: -0.1; opacity: 0; }
+}
+.boot-pad {
+  fill: #67e8f9;
+  opacity: 0.5;
+  filter: drop-shadow(0 0 4px rgba(103, 232, 249, 0.8));
+  animation: boot-pad-glow 3.2s ease-in-out infinite;
+}
+@keyframes boot-pad-glow {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.9; }
+}
+
+/* decorative telemetry tags */
+.hud-tag {
+  position: absolute;
+  font-family: var(--font-monexa);
+  font-size: 9px;
+  letter-spacing: 0.32em;
+  color: rgba(196, 181, 253, 0.34);
+  user-select: none;
+}
+.hud-tag.tl { top: 22px; left: 26px; }
+.hud-tag.tr { top: 22px; right: 26px; }
+.hud-tag.bl { bottom: 22px; left: 26px; }
+.hud-tag.br { bottom: 22px; right: 26px; }
+
+/* frame brackets */
+.boot-bracket {
+  position: absolute;
+  width: 30px; height: 30px;
+  border: 1px solid rgba(167, 139, 250, 0.5);
+}
+.boot-bracket.tl { top: 48px; left: 48px; border-right: 0; border-bottom: 0; }
+.boot-bracket.tr { top: 48px; right: 48px; border-left: 0; border-bottom: 0; }
+.boot-bracket.bl { bottom: 48px; left: 48px; border-right: 0; border-top: 0; }
+.boot-bracket.br { bottom: 48px; right: 48px; border-left: 0; border-top: 0; }
+.boot-bracket { animation: boot-br-in 1s var(--spring) both; }
+@keyframes boot-br-in {
+  from { transform: scale(2); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* ---- composition column ---- */
+.boot-stage-wrap {
+  position: relative;
+  z-index: 2;
+  width: min(560px, calc(100vw - 40px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  animation: boot-wrap-in 1s var(--spring) both 0.1s;
+}
+@keyframes boot-wrap-in {
+  from { opacity: 0; transform: translateY(22px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+.boot-head-row {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+.boot-kicker {
+  font-family: var(--font-monexa);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5em;
+  color: var(--ink);
+}
+.boot-greet-inline {
+  font-family: var(--font-monexa);
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  color: var(--ink-faint);
+  text-align: right;
+}
+
+/* ---- central core : 3D tilted ring assembly ---- */
+.boot-core {
+  perspective: 900px;
+  width: min(340px, 78vw);
+  aspect-ratio: 1;
+  margin: 6px 0 26px;
+}
+.boot-rings {
+  position: relative;
+  width: 100%; height: 100%;
+  transform-style: preserve-3d;
+  transform: rotateX(16deg);
+  animation: core-float 9s ease-in-out infinite;
+  will-change: transform;
+}
+@keyframes core-float {
+  0%, 100% { transform: rotateX(16deg) translateZ(0); }
+  50% { transform: rotateX(13deg) translateZ(14px); }
+}
+.boot-rings i.ring,
+.boot-orbits,
+.boot-arc,
+.boot-glass,
+.arc-head,
+.boot-hero {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+}
+
+/* static orbit geometry */
+.boot-orbits { transform: rotateX(0deg); }
+.orbit {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+.orbit.dashed {
+  stroke: rgba(167, 139, 250, 0.3);
+  stroke-width: 1;
+  stroke-dasharray: 1.2 2.2;
+  animation: spin-cw 60s linear infinite;
+  transform-origin: 50% 50%;
+}
+.orbit.ticks {
+  stroke: rgba(196, 181, 253, 0.35);
+  stroke-width: 3;
+  stroke-dasharray: "0.18 1.82";
+  opacity: 0.5;
+  animation: spin-ccw 120s linear infinite;
+  transform-origin: 50% 50%;
+}
+.orbit.fine {
+  stroke: rgba(103, 232, 249, 0.18);
+  stroke-width: 0.75;
+  stroke-dasharray: 0.4 1.6;
+  animation: spin-cw 90s linear infinite reverse;
+  transform-origin: 50% 50%;
+}
+@keyframes spin-cw  { to { transform: rotate(360deg); } }
+@keyframes spin-ccw { to { transform: rotate(-360deg); } }
+
+/* rotating solid rings — each its own speed/direction/depth */
+.boot-rings .ring {
+  display: block;
+  border-radius: 50%;
+  will-change: transform;
+}
+.boot-rings .r1 {
+  inset: 4%;
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  box-shadow:
+    inset 0 0 30px rgba(139, 92, 246, 0.12),
+    0 0 24px rgba(139, 92, 246, 0.08);
+  animation: ring-spin 26s linear infinite;
+  transform: translateZ(-8px);
+}
+.boot-rings .r2 {
+  inset: 12.5%;
+  border-left: 2px solid rgba(103, 232, 249, 0.55);
+  border-right: 1px solid rgba(103, 232, 249, 0.12);
+  border-top: 1px solid rgba(103, 232, 249, 0.12);
+  border-bottom: 1px solid rgba(103, 232, 249, 0.12);
+  animation: ring-spin 11s linear infinite reverse;
+  transform: translateZ(6px);
+  filter: drop-shadow(0 0 6px rgba(103, 232, 249, 0.35));
+}
+.boot-rings .r3 {
+  inset: 21%;
+  border: 1px dashed rgba(196, 181, 253, 0.28);
+  animation: ring-spin 40s linear infinite;
+  transform: translateZ(-16px);
+  opacity: 0.8;
+}
+.boot-rings .r4.segs {
+  inset: 27.5%;
+  background:
+    conic-gradient(
+      from 0deg,
+      rgba(103, 232, 249, 0.5) 0deg 14deg,
+      transparent 14deg 90deg,
+      rgba(139, 92, 246, 0.45) 90deg 104deg,
+      transparent 104deg 200deg,
+      rgba(103, 232, 249, 0.3) 200deg 210deg,
+      transparent 210deg 360deg
+    );
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  animation: ring-spin 7s cubic-bezier(0.6, 0.05, 0.4, 0.95) infinite alternate;
+  transform: translateZ(12px);
+}
+@keyframes ring-spin { to { transform: var(--tz, translateZ(0)) rotate(360deg); } }
+.boot-rings .r1 { --tz: translateZ(-8px); }
+.boot-rings .r2 { --tz: translateZ(6px); }
+.boot-rings .r3 { --tz: translateZ(-16px); }
+.boot-rings .r4 { --tz: translateZ(12px); }
+
+/* real progress arc — same `display` value as before */
+.boot-arc { transform: rotate(-90deg); z-index: 3; }
+.arc-track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.06);
+  stroke-width: 2.5;
+  vector-effect: non-scaling-stroke;
+}
+.arc-fill {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+  stroke: url(#none);
+  stroke: #67e8f9;
+  filter:
+    drop-shadow(0 0 6px rgba(103, 232, 249, 0.85))
+    drop-shadow(0 0 16px rgba(139, 92, 246, 0.45));
+  transition: stroke-dasharray 0.15s linear;
+}
+/* leading energy head rides the arc tip */
+.arc-head {
+  z-index: 4;
+  pointer-events: none;
+  transform: rotate(calc(var(--p, 0) * 3.6deg));
+  transition: transform 0.15s linear;
+  will-change: transform;
+}
+.arc-head::before {
+  content: "";
+  position: absolute;
+  left: 50%; top: 4%;
+  width: 9px; height: 9px;
+  margin: -4.5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow:
+    0 0 8px #fff,
+    0 0 18px #67e8f9,
+    0 0 36px rgba(139, 92, 246, 0.8),
+    12px 0 14px -6px rgba(103, 232, 249, 0.6),
+    -22px 0 18px -8px rgba(103, 232, 249, 0.4);
+}
+/* escaping spark particles at the head */
+.arc-head::after {
+  content: "";
+  position: absolute;
+  left: 50%; top: 4%;
+  width: 3px; height: 3px;
+  margin: -1.5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow:
+    6px -8px 0 -0.5px rgba(103, 232, 249, 0.7),
+    -9px 5px 0 -1px rgba(139, 92, 246, 0.6),
+    3px 11px 0 -1.2px rgba(103, 232, 249, 0.5);
+  animation: head-spark 0.9s linear infinite;
+}
+@keyframes head-spark {
+  0% { transform: rotate(0deg) translateY(0); opacity: 1; }
+  100% { transform: rotate(40deg) translateY(-14px); opacity: 0; }
+}
+
+/* frosted glass plate behind readout */
+.boot-glass {
+  inset: 17%;
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.008) 45%, rgba(255, 255, 255, 0.03));
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(3px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    inset 0 -8px 24px rgba(2, 1, 6, 0.55),
+    0 0 40px rgba(2, 1, 6, 0.6);
+  transform: translateZ(4px);
+  z-index: 2;
+}
+.boot-glass::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(115deg, transparent 30%, rgba(255, 255, 255, 0.05) 46%, transparent 58%);
+  animation: glass-sheen 6s ease-in-out infinite;
+}
+@keyframes glass-sheen {
+  0%, 100% { opacity: 0.3; transform: translateX(-8%); }
+  50% { opacity: 1; transform: translateX(8%); }
+}
+
+/* hero readout — counter-tilted so it stays perfectly readable */
+.boot-hero {
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  z-index: 5;
+  transform: translateZ(30px) rotateX(-16deg);
+}
+.boot-num {
+  font-family: var(--font-quantix);
+  font-weight: 800;
+  font-size: clamp(56px, 13vw, 84px);
+  line-height: 0.95;
+  color: #f4f1ff;
+  letter-spacing: 0.01em;
+  text-shadow:
+    0 2px 0 rgba(76, 29, 149, 0.55),
+    0 10px 30px rgba(2, 1, 6, 0.9),
+    0 0 34px rgba(139, 92, 246, 0.35);
+}
+.boot-unit {
+  font-family: var(--font-monexa);
+  font-size: 15px;
+  color: rgba(103, 232, 249, 0.85);
+  letter-spacing: 0.4em;
+  margin-top: 2px;
+  text-shadow: 0 0 12px rgba(103, 232, 249, 0.5);
+}
+.boot-stage {
+  font-style: normal;
+  font-family: var(--font-monexa);
+  font-size: 10px;
+  letter-spacing: 0.3em;
+  color: rgba(196, 181, 253, 0.65);
+  max-width: 88%;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- transmission bar ---- */
+.boot-bar {
+  width: min(480px, 100%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+.bar-cap {
+  font-family: var(--font-monexa);
+  font-size: 9px;
+  letter-spacing: 0.34em;
+  color: rgba(196, 181, 253, 0.4);
+  white-space: nowrap;
+}
+.boot-bar .boot-track {
+  position: relative;
+  flex: 1;
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(167, 139, 250, 0.28);
+  background:
+    linear-gradient(180deg, rgba(2, 1, 6, 0.9), rgba(10, 8, 22, 0.65));
+  box-shadow:
+    inset 0 2px 8px rgba(0, 0, 0, 0.8),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+  overflow: visible;
+}
+.boot-ticks {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0 calc(10% - 1px),
+    rgba(167, 139, 250, 0.22) calc(10% - 1px) 10%
+  );
+  mask: linear-gradient(180deg, #000 0 2px, transparent 2px calc(100% - 2px), #000 calc(100% - 2px));
+  -webkit-mask: linear-gradient(180deg, #000 0 2px, transparent 2px calc(100% - 2px), #000 calc(100% - 2px));
+  pointer-events: none;
+}
+.boot-fill {
+  position: absolute;
+  inset: 1px auto 1px 1px;
+  border-radius: 999px;
+  max-width: calc(100% - 2px);
+  background:
+    repeating-linear-gradient(-55deg, rgba(255, 255, 255, 0.22) 0 1.5px, transparent 1.5px 8px),
+    linear-gradient(90deg, #4c1d95, #7c5cff 55%, #67e8f9);
+  background-size: 14px 100%, 100% 100%;
+  animation: boot-wave-slide 0.7s linear infinite;
+  box-shadow: 0 0 14px rgba(103, 232, 249, 0.45);
+  transition: width 0.15s linear;
+}
+@keyframes boot-wave-slide { to { background-position: 14px 0, 0 0; } }
+.boot-head {
+  position: absolute;
+  top: 50%;
+  width: 7px; height: 7px;
+  margin: -3.5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow:
+    0 0 8px #fff,
+    0 0 18px #67e8f9,
+    -14px 0 12px -4px rgba(103, 232, 249, 0.55),
+    -28px 0 16px -7px rgba(139, 92, 246, 0.4);
+  transition: left 0.15s linear;
+}
+.boot-bar[data-settled="1"] .boot-fill {
+  animation: boot-wave-slide 0.7s linear infinite, boot-flash 0.55s var(--ease-out) 1;
+}
+@keyframes boot-flash {
+  40% { filter: brightness(2); }
+}
+
+/* ---- status dropdown / checks (frosted telemetry) ---- */
+.boot-status-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-family: var(--font-monexa);
+  font-size: 10px;
+  letter-spacing: 0.3em;
+  color: var(--ink-dim);
+  background: rgba(12, 8, 26, 0.55);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(167, 139, 250, 0.22);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all var(--t-fast) var(--ease-out);
+}
+.boot-status-toggle:hover {
+  color: var(--ink);
+  border-color: rgba(167, 139, 250, 0.5);
+  box-shadow: 0 0 20px rgba(139, 92, 246, 0.18);
+}
+.boot-status-toggle svg { transition: transform var(--t-fast) var(--ease-out); }
+.boot-status-toggle svg.up { transform: rotate(180deg); }
+
+.boot-checks {
+  list-style: none;
+  margin: 10px auto 0;
+  padding: 4px 14px;
+  width: min(420px, 94%);
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  background: rgba(8, 5, 18, 0.6);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(167, 139, 250, 0.16);
+  border-radius: 14px;
+  transition: max-height var(--t-med) var(--ease-out), opacity var(--t-med) var(--ease-out), padding var(--t-med);
+  text-align: left;
+}
+.boot-checks.open { max-height: 240px; opacity: 1; padding: 8px 14px; }
+.boot-checks li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid rgba(167, 139, 250, 0.1);
+  font-family: var(--font-monexa);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--ink-dim);
+}
+.boot-checks li:last-child { border-bottom: 0; }
+.boot-checks b { color: var(--ink); min-width: 128px; }
+.boot-checks .boot-hint { flex: 1; color: var(--ink-faint); font-size: 10px; }
+.boot-checks em { font-style: normal; font-size: 10px; letter-spacing: 0.22em; color: var(--ink-faint); }
+.boot-checks li[data-state="running"] em { color: #67e8f9; animation: boot-blink 0.8s steps(2) infinite; }
+.boot-checks li[data-state="ok"] .boot-dot { background: #86efac; box-shadow: 0 0 8px #86efac; }
+.boot-checks li[data-state="ok"] em { color: #86efac; }
+.boot-checks li[data-state="error"] .boot-dot { background: #fca5a5; box-shadow: 0 0 8px #fca5a5; }
+.boot-checks li[data-state="error"] em { color: #fca5a5; }
+.boot-warn-note { font-size: 10px !important; color: rgba(252, 165, 165, 0.7) !important; line-height: 1.6; }
+
+.boot-dot {
+  width: 6px; height: 6px; min-width: 6px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+}
+.boot-dot.ok { background: #86efac; box-shadow: 0 0 8px #86efac; }
+.boot-dot.warn { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; }
+.boot-checks li[data-state="running"] .boot-dot {
+  background: #67e8f9;
+  animation: boot-pulse-dot 0.9s ease-in-out infinite;
+}
+@keyframes boot-pulse-dot {
+  50% { transform: scale(1.6); opacity: 0.5; }
+}
+@keyframes boot-blink { 50% { opacity: 0.25; } }
+
+.boot-foot {
+  margin-top: 18px;
+  font-family: var(--font-monexa);
+  font-size: 9px;
+  letter-spacing: 0.4em;
+  color: var(--ink-faint);
+  animation: boot-blink 2s steps(2) infinite;
+}
+
+/* responsive: protect the hero, shed detail */
+@media (max-width: 720px) {
+  .hud-tag, .boot-mote.m4, .boot-mote.m5 { display: none; }
+  .boot-core { width: min(300px, 84vw); }
+  .boot-num { font-size: clamp(48px, 16vw, 64px); }
+  .boot-head-row { flex-direction: column; gap: 4px; align-items: center; }
+  .orbit.dashed, .ring.r3 { display: none; }
+}
