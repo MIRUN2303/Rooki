@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useBentoGlow } from "./useBentoGlow";
 import type { Bi, ChartData, Lang, ResearchResult, SourceRef, Stat } from "./engine";
 import type { ImageRef } from "./research";
 import type { MediaItem } from "./tools";
@@ -174,6 +175,22 @@ export function ImagePanel({
   lang: Lang;
   onClose: () => void;
 }) {
+  const [slideIdx, setSlideIdx] = useState(0);
+
+  /* auto-advance slideshow */
+  useEffect(() => {
+    if (!open || images.length < 2) return;
+    const iv = setInterval(() => setSlideIdx((i) => (i + 1) % images.length), 3500);
+    return () => clearInterval(iv);
+  }, [open, images.length]);
+
+  useEffect(() => { setSlideIdx(0); }, [images]);
+
+  const mainImg = images[slideIdx % Math.max(images.length, 1)];
+  const thumbs = images
+    .filter((_, i) => i !== slideIdx % Math.max(images.length, 1))
+    .slice(0, 8);
+
   return (
     <aside className={`panel-shell research${open ? " open" : ""}`}>
       <div className="glass" onPointerMove={glare}>
@@ -205,20 +222,33 @@ export function ImagePanel({
                 </span>
               </div>
             ) : (
-              <div className="img-grid">
-                {images.map((im, i) => (
-                  <a key={i} href={im.url} target="_blank" rel="noopener noreferrer" className="img-cell" title={im.title}>
-                    <img src={im.thumb} alt={im.title || "image"} loading="lazy" />
-                    {im.title && <span className="img-title">{im.title}</span>}
-                  </a>
-                ))}
+              <div className="img-slideshow">
+                {/* main slide */}
+                <a href={mainImg?.url} target="_blank" rel="noopener noreferrer" className="img-slide-main">
+                  <img src={mainImg?.thumb ?? mainImg?.url} alt={mainImg?.title || "image"} />
+                  {mainImg?.title && <span className="img-slide-caption">{mainImg.title}</span>}
+                </a>
+                {/* thumbnail strip */}
+                {thumbs.length > 0 && (
+                  <div className="img-slide-thumbs">
+                    {thumbs.map((im, i) => (
+                      <button
+                        key={i}
+                        className="img-slide-thumb"
+                        onClick={() => {
+                          const realIdx = images.indexOf(im);
+                          if (realIdx >= 0) setSlideIdx(realIdx);
+                        }}
+                        aria-label={`view ${im.title || `image ${i + 1}`}`}
+                      >
+                        <img src={im.thumb} alt="" loading="lazy" />
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
-
-          <footer className="panel-foot">
-            <span>{lang === "en" ? "From Wikimedia Commons" : "来自维基共享资源"}</span>
-          </footer>
         </div>
       </div>
     </aside>
@@ -363,10 +393,15 @@ export function DataPanel({
 }) {
   const showMedia = mediaOpen && !!media;
   const showChart = open && !!chart;
+  const dataGlow = useBentoGlow<HTMLElement>();
   return (
-    <aside className={`panel-shell data${showChart || showMedia ? " open" : ""}`}>
-      <div className="glass" onPointerMove={glare}>
-        <div className="panel-inner" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+    <aside ref={dataGlow} className={`panel-shell data bento-glow${showChart || showMedia ? " open" : ""}`}
+      style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}
+    >
+      <div className="glass" onPointerMove={glare}
+        style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}
+      >
+        <div className="panel-inner" style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
           <header className="panel-head">
             <i
               className="status-dot"
@@ -391,7 +426,9 @@ export function DataPanel({
           </header>
 
           {showMedia ? (
-            <MediaWidget media={media} lang={lang} />
+            <div className="panel-body" style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", padding: 0 }}>
+              <MediaWidget media={media} lang={lang} />
+            </div>
           ) : (
             chart && (
               <>
@@ -487,6 +524,20 @@ function MediaWidget({ media, lang }: { media: MediaItem | null; lang: Lang }) {
     };
     window.addEventListener("rooki-media", onMedia);
     return () => window.removeEventListener("rooki-media", onMedia);
+  });
+
+  /* auto-advance: YouTube iframe posts playerState=0 when video ENDS */
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      try {
+        const data = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
+        if (data?.event === "infoDelivery" && data?.info?.playerState === 0) {
+          if (queue && idx < queue.length - 1) setIdx((i) => i + 1);
+        }
+      } catch { /* not YT message */ }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
   });
 
   if (!currentId) return null;

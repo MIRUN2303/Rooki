@@ -192,15 +192,26 @@ canvas {
 }
 
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
+  background: rgba(139, 92, 246, 0.28);
   border-radius: 99px;
+  border: 1.5px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 92, 246, 0.5);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(139, 92, 246, 0.28) transparent;
 }
 
 /* ============================================================
@@ -221,7 +232,7 @@ canvas {
   content: "";
   position: absolute;
   inset: 0;
-  border-radius: inherit;
+  border-radius: inherit !important;
   pointer-events: none;
   background: radial-gradient(
     620px circle at var(--mx, 50%) var(--my, 0%),
@@ -1064,8 +1075,8 @@ canvas {
 
 /* ---------------- media widget (music/video in the data panel) ---------------- */
 .media-frame-wrap {
-  flex: 1;
-  min-height: 0;
+  flex: 0 0 auto;
+  min-height: 180px;
   padding: 8px 12px 0;
 }
 .media-frame {
@@ -1074,6 +1085,7 @@ canvas {
   border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 14px;
   background: #000;
+  display: block;
 }
 
 .media-card {
@@ -1224,19 +1236,24 @@ canvas {
   position: relative;
   margin: 0 auto 26px;
   z-index: var(--z-chat);
-  width: min(760px, calc(100vw - 40px));
+  width: min(720px, calc(100vw - 40px));
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px 14px 10px;
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  padding: 14px 18px 12px;
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
   background: linear-gradient(
-    160deg,
-    rgba(255, 255, 255, 0.06),
-    rgba(255, 255, 255, 0.015) 42%,
-    rgba(255, 255, 255, 0.035)
+    168deg,
+    rgba(10, 12, 20, 0.78),
+    rgba(6, 8, 14, 0.72) 50%,
+    rgba(12, 14, 24, 0.76)
   );
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow:
+    0 -8px 50px -12px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .chat-panel:focus-within {
@@ -1249,15 +1266,13 @@ canvas {
 
 /* messages — max ~4 sentences, scrollable beyond */
 .chat-scroll {
-  max-height: 150px;
+  max-height: 260px;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  scrollbar-width: thin;
-  mask-image: linear-gradient(to bottom, transparent 0, black 26px, black 100%);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 26px, black 100%);
+  overscroll-behavior: contain;
 }
 
 .chat-composer {
@@ -1294,10 +1309,10 @@ canvas {
 .msg.user {
   align-self: flex-end;
   max-width: min(72%, 560px);
-  padding: 11px 17px;
-  border-radius: 20px 20px 6px 20px;
   font-size: 14px;
-  color: var(--ink);
+  color: rgba(196, 181, 253, 0.92);
+  text-align: right;
+  padding: 4px 0;
 }
 
 .msg.ai {
@@ -1306,7 +1321,10 @@ canvas {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  padding-left: 14px;
+  border-left: 2px solid rgba(139, 92, 246, 0.3);
 }
+
 
 .msg-role {
   display: flex;
@@ -1468,17 +1486,14 @@ canvas {
 }
 
 .round-btn.send {
-  color: #0a0b16;
-  background: linear-gradient(140deg, var(--violet), var(--violet-soft));
+  color: #fff;
+  background: linear-gradient(140deg, #7c5cff, #a78bfa);
   border-color: transparent;
-  box-shadow: 0 8px 26px -8px rgba(124, 92, 255, 0.8);
-  opacity: 0.45;
-  pointer-events: none;
+  box-shadow: 0 4px 20px -4px rgba(124, 92, 255, 0.7);
 }
-
-.round-btn.send.active {
-  opacity: 1;
-  pointer-events: auto;
+.round-btn.send:not(.active) {
+  opacity: 0.35;
+  transform: scale(0.88);
 }
 
 .round-btn.send.active:hover {
@@ -2555,7 +2570,7 @@ canvas {
   content: "";
   position: absolute;
   inset: 0;
-  border-radius: inherit;
+  border-radius: inherit !important;
   background: linear-gradient(115deg, transparent 30%, rgba(255, 255, 255, 0.05) 46%, transparent 58%);
   animation: glass-sheen 6s ease-in-out infinite;
 }
@@ -2639,7 +2654,7 @@ canvas {
 .boot-ticks {
   position: absolute;
   inset: 0;
-  border-radius: inherit;
+  border-radius: inherit !important;
   background: repeating-linear-gradient(
     90deg,
     transparent 0 calc(10% - 1px),
@@ -2816,4 +2831,1032 @@ canvas {
   letter-spacing: 0.18em;
   color: var(--ink-faint);
   flex-shrink: 0;
+}
+
+
+/* ╔════════════════════════════════════════════════════════════╗
+   ║  ROOKI — PRODUCTION VISUAL LAYER                            ║
+   ║  Pure styling. Later rules override earlier definitions.    ║
+   ╚════════════════════════════════════════════════════════════╝ */
+
+:root {
+  --bg-deep: #030407;
+  --bg-mid: #05070b;
+  --glass-1: rgba(255, 255, 255, 0.032);
+  --glass-2: rgba(13, 16, 26, 0.55);
+  --glass-3: rgba(10, 12, 20, 0.78);
+  --edge-hi: rgba(255, 255, 255, 0.09);
+  --edge-soft: rgba(167, 139, 250, 0.22);
+  --glow-violet: rgba(139, 92, 246, 0.45);
+  --glow-cyan: rgba(103, 232, 249, 0.35);
+  --ink-strong: #f2effc;
+  --ease-fluid: cubic-bezier(0.32, 0.94, 0.28, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.42, 1);
+}
+
+/* ---------- environment ---------- */
+body {
+  background:
+    radial-gradient(1100px 700px at 18% -10%, rgba(76, 29, 149, 0.14), transparent 60%),
+    radial-gradient(900px 640px at 85% 108%, rgba(8, 47, 73, 0.17), transparent 62%),
+    radial-gradient(700px 500px at 50% 52%, rgba(139, 92, 246, 0.05), transparent 65%),
+    linear-gradient(175deg, var(--bg-mid), var(--bg-deep) 70%);
+}
+.vignette {
+  background: radial-gradient(
+    ellipse at center,
+    transparent 42%,
+    rgba(1, 1, 3, 0.5) 88%
+  ) !important;
+}
+
+/* ---------- glass material system ---------- */
+.topbar {
+  background: transparent;
+
+  border: none !important;
+
+}
+.brand span {
+  font-family: var(--font-monexa) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.46em !important;
+  color: var(--ink-strong) !important;
+}
+.icon-btn {
+  border-radius: 10px !important;
+  transition: transform var(--t-fast) var(--ease-spring), box-shadow var(--t-fast), color var(--t-fast);
+}
+.icon-btn:hover {
+  transform: translateY(-1px);
+  color: var(--ink-strong);
+  box-shadow: 0 0 0 1px var(--edge-soft), 0 6px 18px -8px var(--glow-violet);
+}
+.icon-btn:active { transform: translateY(0) scale(0.94); }
+
+/* ---------- core stage ---------- */
+.core-zone { gap: 26px !important; }
+.core-canvas {
+  filter: drop-shadow(0 22px 60px rgba(76, 29, 149, 0.35));
+  transition: filter 1.2s ease;
+}
+.core-label {
+  font-family: var(--font-monexa) !important;
+  font-size: 10.5px !important;
+  letter-spacing: 0.44em !important;
+  text-transform: uppercase !important;
+  color: var(--label-color) !important;
+}
+.core-sub {
+  font-family: var(--font-calior) !important;
+  font-size: 13px !important;
+  color: var(--ink-faint) !important;
+  letter-spacing: 0.06em;
+}
+
+/* ---------- chat: floating text, no bubbles ---------- */
+.chat-panel.glass {
+  background: linear-gradient(165deg, rgba(16, 19, 31, 0.72), rgba(9, 11, 18, 0.66)) !important;
+  backdrop-filter: blur(22px) saturate(150%) !important;
+  border: 1px solid var(--edge-hi) !important;
+  box-shadow:
+    0 -10px 60px -20px rgba(0, 0, 0, 0.75),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+  transition: border-color 0.7s var(--ease-fluid), box-shadow 0.7s var(--ease-fluid);
+}
+.chat-panel.listening {
+  border-color: rgba(167, 139, 250, 0.38) !important;
+  box-shadow:
+    0 0 0 1px rgba(167, 139, 250, 0.14),
+    0 -14px 70px -18px var(--glow-violet),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07) !important;
+}
+.msg {
+  background: transparent !important;
+  border: none !important;
+  padding: 10px 6px !important;
+  max-width: 76ch;
+  animation: msg-enter 0.55s var(--ease-fluid) both;
+}
+@keyframes msg-enter {
+  from { opacity: 0; transform: translateY(10px); filter: blur(5px); }
+}
+.msg.ai .msg-body,
+.msg.ai p { text-shadow: 0 0 24px rgba(139, 92, 246, 0.14); }
+.msg-role {
+  font-family: var(--font-monexa) !important;
+  font-size: 8.5px !important;
+  letter-spacing: 0.34em !important;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+.msg:last-child { animation-duration: 0.7s; }
+
+/* composer — liquid glass command surface */
+.chat-composer input,
+.chat-panel input[type="text"] {
+  background: transparent !important;
+  border: none !important;
+  font-size: 14.5px !important;
+}
+.round-btn {
+  border: 1px solid var(--edge-hi) !important;
+  background: var(--glass-1) !important;
+  backdrop-filter: blur(10px);
+  transition: transform var(--t-fast) var(--ease-spring), box-shadow var(--t-fast), background var(--t-fast) !important;
+}
+.round-btn:hover { transform: translateY(-2px); }
+.round-btn:active { transform: scale(0.92); }
+.round-btn.voice.listening {
+  border-color: rgba(167, 139, 250, 0.65) !important;
+  box-shadow:
+    0 0 0 1px rgba(167, 139, 250, 0.25),
+    0 0 24px rgba(139, 92, 246, 0.45),
+    0 0 60px rgba(139, 92, 246, 0.18) !important;
+  animation: voice-breathe 2.4s ease-in-out infinite;
+}
+@keyframes voice-breathe {
+  50% { box-shadow: 0 0 0 1px rgba(167,139,250,.2), 0 0 34px rgba(139,92,246,.6), 0 0 90px rgba(139,92,246,.25); }
+}
+.round-btn.voice.error {
+  border-color: rgba(252, 165, 165, 0.6) !important;
+  box-shadow: 0 0 24px rgba(252, 100, 100, 0.35) !important;
+  animation: none;
+}
+.round-btn.send.active {
+  border-color: rgba(103, 232, 249, 0.5) !important;
+  box-shadow: 0 0 18px rgba(103, 232, 249, 0.28) !important;
+}
+
+/* ---------- magic-transform panel reveals ---------- */
+.panel-stack > aside,
+.panel-shell {
+  transition:
+    opacity 0.75s var(--ease-fluid),
+    transform 0.75s var(--ease-fluid),
+    filter 0.75s var(--ease-fluid) !important;
+  will-change: transform, opacity, filter;
+}
+.panel-shell.research {
+  transform-origin: left center;
+  filter: blur(14px);
+  opacity: 0;
+  transform: translateX(26px) scale(0.94);
+}
+.panel-shell.research.open {
+  filter: blur(0);
+  opacity: 1;
+  transform: translateX(0) scale(1);
+}
+.panel-shell.data {
+  transform-origin: right center;
+  filter: blur(14px);
+  opacity: 0;
+  transform: translateX(-26px) scale(0.94);
+}
+.panel-shell.data.open {
+  filter: blur(0);
+  opacity: 1;
+  transform: translateX(0) scale(1);
+}
+.panel-inner,
+.panel-body {
+  background: transparent !important;
+}
+.panel-stack > aside {
+  background: linear-gradient(168deg, rgba(15, 18, 29, 0.68), rgba(8, 10, 16, 0.74)) !important;
+  backdrop-filter: blur(24px) saturate(145%) !important;
+  border: 1px solid var(--edge-hi) !important;
+  box-shadow:
+    0 30px 90px -30px rgba(0, 0, 0, 0.8),
+    inset 0 1px 0 rgba(255, 255, 255, 0.055) !important;
+}
+
+/* source rows */
+.source-chip {
+  background: var(--glass-1) !important;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast);
+}
+.source-chip:hover {
+  transform: translateY(-1px);
+  border-color: var(--edge-soft) !important;
+  box-shadow: 0 6px 22px -10px var(--glow-violet);
+}
+
+/* chart container */
+.chart-html, .chart-wrap {
+  background: var(--glass-1);
+  border-radius: 16px;
+}
+
+/* ---------- media widget polish ---------- */
+.media-frame-wrap {
+  border-radius: 14px !important;
+  overflow: hidden;
+  border: 1px solid var(--edge-hi);
+  box-shadow: 0 18px 50px -22px rgba(0, 0, 0, 0.8);
+}
+.media-frame-wrap:fullscreen { border: none; border-radius: 0; }
+.media-title { color: var(--ink-strong) !important; }
+.media-play-btn:not(:disabled):hover {
+  transform: scale(1.08) !important;
+  box-shadow: 0 0 26px rgba(53, 224, 255, 0.5) !important;
+}
+.media-list-item { transition: background var(--t-fast), opacity var(--t-fast); }
+.media-up-next-tag { align-self: center; }
+
+/* ---------- settings modal ---------- */
+.modal {
+  background: linear-gradient(168deg, rgba(15, 18, 29, 0.92), rgba(7, 9, 15, 0.95)) !important;
+  backdrop-filter: blur(26px) saturate(150%) !important;
+  border: 1px solid var(--edge-hi) !important;
+  box-shadow:
+    0 40px 120px -30px rgba(0, 0, 0, 0.9),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+  animation: modal-in 0.5s var(--ease-fluid) both;
+}
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(16px) scale(0.97); filter: blur(8px); }
+}
+.set-group {
+  background: var(--glass-1);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  padding: 14px;
+  transition: border-color var(--t-fast);
+}
+.set-group:hover { border-color: var(--edge-soft); }
+.set-group-title {
+  font-family: var(--font-monexa) !important;
+  font-size: 9.5px !important;
+  letter-spacing: 0.36em !important;
+  text-transform: uppercase;
+  color: var(--violet-soft) !important;
+}
+
+/* ---------- boot screen continuity ---------- */
+.boot-screen.leaving { transform: scale(1.04); }
+
+/* ---------- micro interactions ---------- */
+button { -webkit-tap-highlight-color: transparent; }
+
+/* ---------- reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001s !important;
+  }
+}
+
+/* ---------- responsive recomposition ---------- */
+@media (max-width: 900px) {
+  .panel-stack,
+  .panel-stack.left {
+    position: fixed;
+    inset: auto 0 96px 0 !important;
+    width: calc(100vw - 24px) !important;
+    margin: 0 auto !important;
+    max-height: 46vh;
+    z-index: var(--z-ui);
+  }
+  .panel-shell.research {
+    transform-origin: bottom center;
+    transform: translateY(30px) scale(0.96);
+  }
+  .panel-shell.research.open {
+    transform: translateY(0) scale(1);
+  }
+  .panel-shell.data {
+    transform-origin: bottom center;
+    transform: translateY(30px) scale(0.96);
+  }
+  .panel-shell.data.open {
+    transform: translateY(0) scale(1);
+  }
+  .chat-panel { width: calc(100vw - 24px) !important; }
+}
+
+/* ---------- designed scrollbars on all scroll containers ---------- */
+.panel-body,
+.chat-scroll,
+.media-list,
+.report-body,
+.modal-body,
+.boot-checks {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(139, 92, 246, 0.3) transparent;
+}
+.panel-body::-webkit-scrollbar,
+.chat-scroll::-webkit-scrollbar,
+.media-list::-webkit-scrollbar,
+.report-body::-webkit-scrollbar,
+.modal-body::-webkit-scrollbar {
+  width: 5px;
+}
+.panel-body::-webkit-scrollbar-thumb,
+.chat-scroll::-webkit-scrollbar-thumb,
+.media-list::-webkit-scrollbar-thumb,
+.report-body::-webkit-scrollbar-thumb,
+.modal-body::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.3);
+  border-radius: 99px;
+}
+.panel-body::-webkit-scrollbar-thumb:hover,
+.chat-scroll::-webkit-scrollbar-thumb:hover,
+.media-list::-webkit-scrollbar-thumb:hover,
+.report-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 92, 246, 0.55);
+}
+
+/* ensure panel-inner passes height down for scroll */
+.panel-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+.panel-body {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+/* ---------- fix scroll with cursor ---------- */
+.chat-panel,
+.panel-shell,
+.modal {
+  pointer-events: auto;
+}
+.panel-body,
+.chat-scroll,
+.media-list {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ---------- remove topbar background container ---------- */
+.topbar {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  border-bottom: none !important;
+}
+
+/* ════════════════════════════════════════
+   IMAGE SLIDESHOW
+   ════════════════════════════════════════ */
+.img-slideshow {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}
+.img-slide-main {
+  position: relative;
+  display: block;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  aspect-ratio: 16/10;
+  background: #000;
+}
+.img-slide-main img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  animation: img-slide-fade 0.5s ease both;
+}
+@keyframes img-slide-fade {
+  from { opacity: 0; transform: scale(1.02); }
+}
+.img-slide-caption {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  padding: 10px 14px;
+  font-size: 11px;
+  color: #fff;
+  background: linear-gradient(transparent, rgba(0,0,0,0.7));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.img-slide-thumbs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: none;
+}
+.img-slide-thumbs::-webkit-scrollbar { display: none; }
+.img-slide-thumb {
+  flex-shrink: 0;
+  width: 64px;
+  height: 42px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1.5px solid transparent;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity var(--t-fast), border-color var(--t-fast);
+  padding: 0;
+  background: none;
+}
+.img-slide-thumb:hover { opacity: 0.85; }
+.img-slide-thumb img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* ════════════════════════════════════════
+   CHAT PANEL FIXES — no dead space, send visible
+   ════════════════════════════════════════ */
+.chat-scroll {
+  max-height: 260px;
+  min-height: 0;
+  flex: 0 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.chat-scroll:empty {
+  display: none;
+}
+
+.round-btn.send {
+  opacity: 0.8 !important;
+  pointer-events: auto !important;
+  flex-shrink: 0;
+}
+.round-btn.send.active {
+  opacity: 1 !important;
+}
+
+/* ════════════════════════════════════════
+   SETTINGS MODAL SCROLL FIX
+   ════════════════════════════════════════ */
+.modal-body {
+  max-height: calc(80vh - 110px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(139, 92, 246, 0.3) transparent;
+  padding-right: 6px;
+}
+.modal-body::-webkit-scrollbar { width: 5px; }
+.modal-body::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.3);
+  border-radius: 99px;
+}
+.modal-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 92, 246, 0.5);
+}
+
+/* ════════════════════════════════════════
+   MEDIA PANEL — no scroll, everything fits
+   ════════════════════════════════════════ */
+.panel-shell.data {
+  width: clamp(340px, 28vw, 420px) !important;
+}
+.panel-stack.left {
+  width: clamp(340px, 28vw, 420px);
+}
+.panel-shell.data .panel-body {
+  overflow-y: auto !important;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* compact video iframe */
+.media-frame-wrap {
+  flex: 0 0 auto !important;
+  flex-shrink: 0;
+  padding: 10px 12px 0;
+  min-height: unset;
+}
+.media-frame {
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+}
+
+/* transport controls — single compact row */
+.media-card {
+  flex-direction: row !important;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px !important;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.media-meta {
+  align-items: flex-start !important;
+  text-align: left !important;
+  flex: 1;
+  min-width: 0;
+}
+.media-title {
+  font-size: 12.5px !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.media-artist {
+  font-size: 10px !important;
+}
+.media-controls {
+  gap: 6px !important;
+  flex-shrink: 0;
+}
+.media-play-btn {
+  width: 34px !important;
+  height: 34px !important;
+}
+
+/* queue — ultra compact, max 2 visible */
+.media-list {
+  padding: 4px 12px 8px !important;
+  gap: 4px !important;
+  overflow-y: auto !important;
+  flex-shrink: 0;
+}
+.media-list-item {
+  padding: 5px 8px !important;
+  border-radius: 8px !important;
+}
+.media-thumb {
+  width: 32px !important;
+  height: 32px !important;
+  border-radius: 6px !important;
+}
+.media-list-meta b {
+  font-size: 11px !important;
+}
+.media-mini-btn {
+  width: 26px !important;
+  height: 26px !important;
+}
+
+
+/* ════════════════════════════════════════
+   BENTO GLOW + BORDER GLOW — cursor reactive
+   ════════════════════════════════════════ */
+
+.bento-glow {
+  --mouse-x: 50%;
+  --mouse-y: 50%;
+  --bento-active: 0;
+}
+
+/* spotlight — soft radial light following cursor inside container */
+.bento-glow::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit !important;
+  pointer-events: none;
+  z-index: 1;
+  background:
+    radial-gradient(
+      300px circle at var(--mouse-x) var(--mouse-y),
+      rgba(139, 92, 246, calc(var(--bento-active) * 0.07)),
+      rgba(103, 232, 249, calc(var(--bento-active) * 0.03)) 45%,
+      transparent 70%
+    );
+  opacity: var(--bento-active);
+  transition: opacity 0.35s ease;
+}
+
+/* border glow — luminous edge segment near cursor */
+.bento-glow::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit !important;
+  padding: 1.5px;
+  pointer-events: none;
+  z-index: 3;
+  background: radial-gradient(
+    200px circle at var(--mouse-x) var(--mouse-y),
+    rgba(167, 139, 250, calc(var(--bento-active) * 0.7)) 0%,
+    rgba(139, 92, 246, calc(var(--bento-active) * 0.25)) 50%,
+    transparent 70%
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  opacity: var(--bento-active);
+  transition: opacity 0.35s ease;
+}
+
+/* inner content above glow layers */
+.bento-glow > * {
+  position: relative;
+  z-index: 2;
+}
+
+/* ---------- topbar transparent ---------- */
+.topbar {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  border-bottom: none !important;
+}
+
+/* ---------- scroll fixes ---------- */
+.panel-inner {
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.panel-body {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+}
+.modal-body {
+  max-height: calc(85vh - 100px) !important;
+  overflow-y: auto !important;
+}
+
+/* ══════════════════════════════════
+   CHAT PANEL FINAL FIX — no dead space
+   ══════════════════════════════════ */
+.chat-panel {
+  height: auto !important;
+  max-height: none !important;
+  min-height: unset !important;
+  padding: 6px 14px !important;
+  gap: 0 !important;
+}
+.chat-panel .chat-scroll {
+  max-height: 220px !important;
+  overflow-y: auto !important;
+}
+.chat-panel .chat-scroll:empty {
+  display: none !important;
+  height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+.chat-panel .chat-composer {
+  padding: 0 !important;
+  margin: 0 !important;
+}
+.chat-panel .suggest {
+  position: absolute !important;
+}
+
+/* ════════════════════════════════════════
+   MEDIA PANEL FINAL — full-size video, all controls visible, no shrink
+   ════════════════════════════════════════ */
+
+/* widen + extend the left panel when media is showing */
+.panel-stack.left {
+  width: clamp(380px, 30vw, 480px) !important;
+
+  max-height: calc(100vh - 200px) !important;
+}
+.panel-shell.data {
+  width: 100% !important;
+  max-height: calc(100vh - 210px) !important;
+}
+
+/* video fills the width properly */
+.media-frame-wrap {
+  flex: 0 0 auto !important;
+  flex-shrink: 0 !important;
+  padding: 10px 12px 6px !important;
+  min-height: unset !important;
+}
+.media-frame-wrap .media-frame,
+.media-frame {
+  width: 100% !important;
+  aspect-ratio: 16 / 9 !important;
+  border-radius: 14px !important;
+  display: block !important;
+}
+
+/* transport controls row */
+.media-card {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  padding: 8px 14px 6px !important;
+  gap: 10px !important;
+  flex-shrink: 0 !important;
+}
+.media-meta {
+  flex: 1 !important;
+  min-width: 0 !important;
+  align-items: flex-start !important;
+}
+.media-title {
+  font-size: 13px !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+.media-controls {
+  gap: 5px !important;
+  flex-shrink: 0 !important;
+}
+.media-play-btn {
+  width: 32px !important;
+  height: 32px !important;
+}
+
+/* queue items — compact but readable */
+.media-list {
+  padding: 2px 12px 10px !important;
+  gap: 3px !important;
+  overflow-y: auto !important;
+  flex-shrink: 0 !important;
+}
+.media-list-item {
+  padding: 5px 8px !important;
+  border-radius: 8px !important;
+  gap: 8px !important;
+}
+.media-thumb {
+  width: 34px !important;
+  height: 26px !important;
+  border-radius: 5px !important;
+  flex-shrink: 0;
+}
+.media-list-meta b {
+  font-size: 11px !important;
+}
+.media-mini-btn {
+  width: 24px !important;
+  height: 24px !important;
+}
+
+/* fullscreen mode */
+.media-frame-wrap:fullscreen .media-frame {
+  height: 100% !important;
+  aspect-ratio: unset !important;
+}
+
+/* ════════════════════════════════════════
+   CHAT PANEL — compact docked bar, original proportions
+   ════════════════════════════════════════ */
+.chat-panel {
+  height: auto !important;
+  max-height: 310px !important;
+  padding: 8px 14px 10px !important;
+  gap: 6px !important;
+}
+.chat-scroll {
+  max-height: 180px !important;
+  overflow-y: auto !important;
+}
+
+/* ════════════════════════════════════════
+   CAROUSEL TABS — research / images switch
+   ════════════════════════════════════════ */
+.carousel-tabs {
+  display: flex;
+  gap: 4px;
+  pointer-events: auto;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 0 4px;
+}
+.carousel-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-family: var(--font-monexa);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--ink-faint);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  transition:
+    color var(--t-fast) ease,
+    background var(--t-fast) ease,
+    border-color var(--t-fast) ease,
+    box-shadow var(--t-fast) ease,
+    transform var(--t-fast) var(--ease-spring);
+}
+.carousel-tab:hover {
+  color: var(--ink-dim);
+  background: rgba(255, 255, 255, 0.06);
+  transform: translateY(-1px);
+}
+.carousel-tab.active {
+  color: var(--ink-strong);
+  background: rgba(139, 92, 246, 0.12);
+  border-color: rgba(167, 139, 250, 0.35);
+  box-shadow: 0 0 16px -4px var(--glow-violet);
+}
+.carousel-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+  flex-shrink: 0;
+  transition: all var(--t-fast) ease;
+}
+.carousel-tab.active .carousel-dot {
+  background: #a78bfa;
+  box-shadow: 0 0 8px rgba(167, 139, 250, 0.8);
+}
+
+/* slide transition between panel bodies */
+.panel-shell.research .panel-inner,
+.panel-shell.data .panel-inner {
+  transition: none; /* panels already have magic-transform entry */
+}
+
+/* the two right-side panels crossfade + slide horizontally */
+.panel-stack > .panel-shell.research {
+  position: relative;
+}
+.panel-stack > .panel-shell.research[style*="display: none"],
+.panel-stack > aside:not(.open) {
+  pointer-events: none !important;
+}
+
+/* when switching tabs, incoming panel slides from the right */
+.panel-shell.research.open .panel-body,
+.panel-shell.research.open .panel-inner > *:not(.panel-head) {
+  animation: carousel-slide-in 0.45s var(--ease-fluid) both;
+}
+@keyframes carousel-slide-in {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* image slideshow also gets a subtle slide */
+.img-slide-main img {
+  animation: img-slide-fade 0.5s ease both, img-slide-push 0.45s var(--ease-fluid) both;
+}
+@keyframes img-slide-push {
+  from { transform: translateX(14px) scale(1.01); }
+}
+
+/* ════════════════════════════════════════
+   CAROUSEL SLIDE — research/images in one container
+   ════════════════════════════════════════ */
+.carousel-track {
+  display: flex;
+  width: 200%;
+  transition: transform 0.55s cubic-bezier(0.32, 0.94, 0.28, 1);
+  will-change: transform;
+}
+.carousel-track.slide-images {
+  transform: translateX(-50%);
+}
+.carousel-slide {
+  width: 50%;
+  flex-shrink: 0;
+  min-width: 0;
+}
+/* panels inside slides fill the slide width */
+.carousel-slide > .panel-shell {
+  width: 100% !important;
+  position: relative !important;
+}
+
+/* ════════════════════════════════════════
+   CAROUSEL SLIDE — research/images swipe
+   ════════════════════════════════════════ */
+
+.carousel-track {
+  display: flex !important;
+  width: 200% !important;
+  transition: transform 0.55s cubic-bezier(0.32, 0.94, 0.28, 1) !important;
+  will-change: transform;
+}
+.carousel-track.slide-images {
+  transform: translateX(-50%) !important;
+}
+
+.carousel-slide {
+  width: 50% !important;
+  flex-shrink: 0 !important;
+  min-width: 0 !important;
+  overflow: hidden;
+}
+
+/* panels inside slides ALWAYS visible — track controls visibility */
+.carousel-slide .panel-shell {
+  opacity: 1 !important;
+  transform: none !important;
+  filter: none !important;
+  pointer-events: auto !important;
+  position: relative !important;
+  width: 100% !important;
+  height: 100%;
+}
+/* kill individual panel open/close transitions inside carousel */
+.carousel-slide .panel-shell.research,
+.carousel-slide .panel-shell.data {
+  transition: none !important;
+}
+
+/* parent clips the inactive slide */
+.panel-stack {
+  overflow: hidden !important;
+}
+
+/* ════════════════════════════════════════
+   CAROUSEL FIX — proper sizing + border + no shrink
+   ════════════════════════════════════════ */
+
+/* panel-stack must clip the inactive slide */
+.panel-stack {
+  overflow: hidden !important;
+}
+
+/* track fills remaining height after tabs */
+.carousel-track {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  display: flex !important;
+}
+
+/* each slide = exactly one panel width, full height */
+.carousel-slide {
+  width: 50% !important;
+  flex-shrink: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  min-height: 0 !important;
+}
+
+/* panels fill their slide and keep glass border */
+.carousel-slide .panel-shell {
+  flex: 1 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  opacity: 1 !important;
+  transform: none !important;
+  filter: none !important;
+  background: linear-gradient(168deg, rgba(15, 18, 29, 0.68), rgba(8, 10, 16, 0.74)) !important;
+  backdrop-filter: blur(24px) saturate(145%) !important;
+  border: 1px solid var(--edge-hi) !important;
+  border-radius: 18px !important;
+  box-shadow: 0 30px 90px -30px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.055) !important;
+}
+
+/* ════════════════════════════════════════
+   DATA PANEL HEIGHT CHAIN — every layer passes height down
+   ════════════════════════════════════════ */
+
+/* panel shell fills the stack */
+.panel-shell.data {
+  display: flex !important;
+  flex-direction: column !important;
+}
+.panel-shell.data .glass {
+  flex: 1 !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+}
+.panel-shell.data .panel-inner {
+  flex: 1 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+.panel-shell.data .panel-head {
+  flex-shrink: 0 !important;
+}
+.panel-shell.data .panel-body {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  padding: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+/* media widget children fill/scroll within panel-body */
+.panel-body .media-frame-wrap {
+  flex-shrink: 0 !important;
+  overflow: hidden !important;
+}
+.panel-body .media-card {
+  flex-shrink: 0 !important;
+}
+.panel-body .media-list {
+  flex-shrink: 0 !important;
+  max-height: 120px !important;
+  overflow-y: auto !important;
+}
+.panel-body .panel-foot {
+  flex-shrink: 0 !important;
+}
+
+/* move strands up slightly */
+.core-canvas {
+  transform: translateY(-8vh);
 }

@@ -754,10 +754,12 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     }
 
     /* music/video request -> show the widget on the left */
+    /* media widget -> open the data panel */
     const mediaRun = runs.find((r) => r.tool === "music.play" || r.tool === "video.play");
     if (mediaRun?.ok && mediaRun.data) {
       setMedia(mediaRun.data as MediaItem);
       setMediaOpen(true);
+      setDataOpen(true);
     }
 
     /* attach research sources/stats to the message when this turn researched */
@@ -913,44 +915,54 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
       </main>
 
       <div className="panel-stack">
-        <div className="stack-tabs">
+        <div className="carousel-tabs">
           <button
-            className={rightTab === "research" ? "on" : ""}
+            className={`carousel-tab${rightTab === "research" ? " active" : ""}`}
             onClick={() => setRightTab("research")}
+            aria-label="Research"
           >
-            Research
+            <i className="carousel-dot" />
+            <span>Research</span>
           </button>
           <button
-            className={rightTab === "images" ? "on" : ""}
+            className={`carousel-tab${rightTab === "images" ? " active" : ""}`}
             onClick={() => setRightTab("images")}
+            aria-label="Images"
           >
-            Images
+            <i className="carousel-dot" />
+            <span>Images</span>
           </button>
         </div>
-        <ResearchPanel
-          open={researchOpen && rightTab === "research"}
-          active={researchActive}
-          expanded={researchExpanded}
-          logs={logs}
-          result={result}
-          lang={langRef.current}
-          onClose={() => {
-            clearTimers();
-            setResearchOpen(false);
-            setResearchActive(false);
-          }}
-        />
-        <ImagePanel
-          open={researchOpen && rightTab === "images"}
-          images={images}
-          loading={imagesLoading}
-          lang={langRef.current}
-          onClose={() => {
-            clearTimers();
-            setResearchOpen(false);
-            setResearchActive(false);
-          }}
-        />
+        <div className={`carousel-track${rightTab === "images" ? " slide-images" : ""}`}>
+          <div className="carousel-slide">
+            <ResearchPanel
+              open={researchOpen}
+              active={researchActive}
+              expanded={researchExpanded}
+              logs={logs}
+              result={result}
+              lang={langRef.current}
+              onClose={() => {
+                clearTimers();
+                setResearchOpen(false);
+                setResearchActive(false);
+              }}
+            />
+          </div>
+          <div className="carousel-slide">
+            <ImagePanel
+              open={researchOpen}
+              images={images}
+              loading={imagesLoading}
+              lang={langRef.current}
+              onClose={() => {
+                clearTimers();
+                setResearchOpen(false);
+                setResearchActive(false);
+              }}
+            />
+          </div>
+        </div>
       </div>
 
       <div className="panel-stack left">

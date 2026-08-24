@@ -83,11 +83,11 @@ export interface MediaItem {
    result queue: deduped videoIds with titles. Works for songs, videos and
    "playlist" queries alike — fuzzy against STT spelling noise because it
    searches YouTube itself. */
-async function ytSearchQueue(q: string, host: "ytm" | "yt"): Promise<{ videoId: string; title: string }[]> {
+async function ytSearchQueue(q: string, host: "ytm" | "yt", noShorts = false): Promise<{ videoId: string; title: string }[]> {
   try {
     const url = host === "ytm"
       ? `/ytm/search?q=${encodeURIComponent(q)}`
-      : `/yt/results?search_query=${encodeURIComponent(q)}`;
+      : `/yt/results?search_query=${encodeURIComponent(q)}${noShorts ? "&sp=EgIQAQ%25D%25D" : ""}`;
     const r = await fetch(url, { headers: { "Accept-Language": "en-US,en;q=0.9" } });
     if (!r.ok) return [];
     let html = await r.text();
@@ -442,8 +442,8 @@ const TOOLS: ToolDef[] = [
     run: async (args, deps) => {
       const q = String(args.query ?? "").trim();
       if (!q) return { ok: false, error: "no query", unsupported: true };
-      const queue = await ytSearchQueue(q, "yt");
-      if (!queue.length) return { ok: false, error: `no YouTube Music results for "${q}"`, unsupported: true };
+      const queue = await ytSearchQueue(q, "yt", true);
+      if (!queue.length) return { ok: false, error: `no results for "${q}"`, unsupported: true };
       deps.performOpen("music", q, deps.lang);
       const first = queue[0];
       return {
@@ -480,8 +480,9 @@ const TOOLS: ToolDef[] = [
     run: async (args, deps) => {
       const q = String(args.query ?? "").trim();
       if (!q) return { ok: false, error: "no query", unsupported: true };
-      let queue = await ytSearchQueue(q, "yt");
-      if (!queue.length) queue = await ytSearchQueue(q + " video", "yt");
+      const wantShorts = /short|shorts/i.test(q);
+      let queue = await ytSearchQueue(q, "yt", !wantShorts);
+      if (!queue.length) queue = await ytSearchQueue(q + " video", "yt", !wantShorts);
       if (!queue.length) return { ok: false, error: `no YouTube results for "${q}"`, unsupported: true };
       deps.performOpen("youtube", q, deps.lang);
       const first = queue[0];

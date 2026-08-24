@@ -77,14 +77,14 @@ for /f "delims=" %%F in ('where %~1 2^>nul') do (set "PY=%%F" & goto :eof)
 goto :eof
 
 :port_up
-%PS% "exit ([int](Test-NetConnection -ComputerName 127.0.0.1 -Port %1 -WarningAction SilentlyContinue).TcpTestSucceeded)" >nul 2>&1
+powershell -NoProfile -Command "$c=New-Object Net.Sockets.TcpClient;try{$c.Connect('127.0.0.1',%1);$r=$c.Connected}catch{$r=$false};$c.Close();exit ([int]$r)" >nul 2>&1
 if %errorlevel%==0 (exit /b 0) else (exit /b 1)
 
 :wait_port
 setlocal
 set /a tries=0
 :wait_loop
-%PS% "exit ([int](Test-NetConnection -ComputerName 127.0.0.1 -Port %1 -WarningAction SilentlyContinue).TcpTestSucceeded)" >nul 2>&1
+powershell -NoProfile -Command "$c=New-Object Net.Sockets.TcpClient;try{$c.Connect('127.0.0.1',%1);$r=$c.Connected}catch{$r=$false};$c.Close();exit ([int]$r)" >nul 2>&1
 if %errorlevel%==0 (endlocal & exit /b 0)
 set /a tries+=1
 if %tries% geq %2 (endlocal & exit /b 1)

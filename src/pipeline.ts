@@ -759,7 +759,7 @@ RULES:
 - MEMORY: silently store durable facts/preferences/projects/goals the user shares; UPDATE existing records instead of duplicating (latest statement wins). Never announce that you stored something. The user's name and your name are PERMANENT — never store them. Never remember secrets/temp state. Most turns: nothing durable.
 - ACT, DON'T ASK: when intent is clear, assume reasonable defaults and proceed immediately.
 - emotion: match the user's tone; warm and low-energy if they seem tired or lonely.
-- media: music.play / video.play; if the user references earlier playback, use Working.activeMedia for context.
+- media: "play [song]" or "play music" -> music.play (audio widget, no shorts). "play [X] video", "watch [X]", "video song" -> video.play (video widget with fullscreen). If user mentions "shorts" or "shorts video" -> video.play with "shorts" in the query. Playlist requests ("play playlist", "play tamil playlist") -> same as above but include "playlist" in query; queue auto-advances. If the user mentions "video" ANYWHERE in the request use video.play. Otherwise default to music.play.
 - chart/build visuals: only when the user's goal requires visualization. "show this as a chart" -> chart.build. "summarize these numbers" -> text summary.
 - FINAL CHECK: Pick the intent that SERVES the user. If you are confident in your own knowledge, answer directly. Research only when you genuinely need fresh data.`;
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { audio, STATE_COLORS } from "./voice";
+import { useBentoGlow } from "./useBentoGlow";
 import type { Bi, Lang, SourceRef, Stat } from "./engine";
 
 /* ---------------- progressive text ---------------- */
@@ -157,6 +158,7 @@ export function ChatPanel({
   const inputRef = useRef<HTMLInputElement>(null);
   const voiceRef = useRef<HTMLButtonElement>(null);
   const prevLen = useRef(messages.length);
+  const glowRef = useBentoGlow<HTMLDivElement>();
 
   const col = STATE_COLORS[phase as keyof typeof STATE_COLORS] ?? STATE_COLORS.idle;
 
@@ -199,19 +201,16 @@ export function ChatPanel({
 
   return (
     <div
-      className={`chat-panel glass${listening ? " listening" : ""}`}
-      onPointerMove={(e) => {
-        const el = e.currentTarget as HTMLElement;
-        const r = el.getBoundingClientRect();
-        el.style.setProperty("--mx", `${e.clientX - r.left}px`);
-        el.style.setProperty("--my", `${e.clientY - r.top}px`);
-      }}
+      ref={glowRef}
+      className={`chat-panel glass bento-glow${listening ? " listening" : ""}`}
     >
-      <div className="chat-scroll" ref={listRef}>
-        {messages.map((m) => (
-          <MessageRow key={m.id} m={m} lang={lang} />
-        ))}
-      </div>
+      {messages.length > 0 && (
+        <div className="chat-scroll" ref={listRef}>
+          {messages.map((m) => (
+            <MessageRow key={m.id} m={m} lang={lang} />
+          ))}
+        </div>
+      )}
 
       <div className="chat-composer">
         <Magnet strength={8}>
