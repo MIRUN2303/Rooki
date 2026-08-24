@@ -537,8 +537,19 @@ function MediaWidget({ media, lang }: { media: MediaItem | null; lang: Lang }) {
         }
       } catch { /* not YT message */ }
     };
+    /* start the listening handshake so YT posts infoDelivery back to us */
+    const startListening = () => {
+      frameRef.current?.contentWindow?.postMessage(
+        JSON.stringify({ event: "listening", id: 1, channel: "widget" }),
+        "*"
+      );
+    };
+    frameRef.current?.addEventListener("load", startListening);
     window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
+    return () => {
+      frameRef.current?.removeEventListener("load", startListening);
+      window.removeEventListener("message", onMessage);
+    };
   });
 
   if (!currentId) return null;
@@ -565,9 +576,6 @@ function MediaWidget({ media, lang }: { media: MediaItem | null; lang: Lang }) {
               className="rtv-iframe"
             />
             {/* glass reflection */}
-            <div className="rtv-glass-overlay" />
-            {/* scanlines */}
-            <div className="rtv-scanlines" />
           </div>
           {/* channel label */}
           <div className="rtv-channel-label">CH {idx + 1}</div>
