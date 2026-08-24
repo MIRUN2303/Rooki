@@ -844,6 +844,8 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     setChart(null);
     setMedia(null);
     setMediaOpen(false);
+    setDataOpen(false);
+    setResearchOpen(false);
     if (anyProviderConfigured(settings)) {
       turnRef.current = true;
       aiTurn(raw, lang).finally(() => {

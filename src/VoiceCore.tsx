@@ -187,37 +187,15 @@ export default function StrandCore() {
       const amp = audio.amplitude;
       const state = audio.state;
 
-      /* per-state motion character (visual tuning of existing uniforms):
-         idle      -> slow, dim, almost still
-         listening -> amplitude-led expansion + glow
-         thinking  -> faster organized circulation, restrained brightness
-         speaking  -> expressive wave energy following output envelope */
-      let speed = 0.5 + amp * 0.7;
-      let intensity = 0.38 + amp * 0.45;
-      let glow = 1.2 + amp * 1.6;
-      let opacity = 0.85;
-      let waviness = 1;
-
-      if (state === "idle") {
-        speed = 0.22; intensity = 0.3; glow = 0.9; opacity = 0.55; waviness = 0.7;
-      } else if (state === "listening") {
-        speed = 0.6 + amp * 0.9; glow = 1.4 + amp * 2.0;
-      } else if (state === "thinking") {
-        speed = 1.15; intensity = 0.34; glow = 1.0; opacity = 0.62; waviness = 1.35;
-      } else if (state === "speaking") {
-        speed = 0.8 + amp * 1.1; intensity = 0.42 + amp * 0.5; glow = 1.3 + amp * 1.8;
-      }
-
       program.uniforms.uTime.value = sec;
       program.uniforms.uColors.value = buildPalette(paletteFor(state));
-      program.uniforms.uSpeed.value = speed;
+      program.uniforms.uSpeed.value = 0.5 + amp * 0.7;
       program.uniforms.uAmplitude.value = 0.95 + amp * 1.5 + audio.pitch * 0.25;
-      program.uniforms.uGlow.value = glow;
-      program.uniforms.uIntensity.value = intensity;
-      program.uniforms.uWaviness.value = waviness;
+      program.uniforms.uGlow.value = 1.2 + amp * 1.6;
+      program.uniforms.uIntensity.value = 0.38 + amp * 0.45;
       program.uniforms.uHueShift.value = audio.pitch * 0.35;
       program.uniforms.uSpread.value = 1 + amp * 0.6;
-      program.uniforms.uOpacity.value = opacity;
+      program.uniforms.uOpacity.value = state === "thinking" ? 0.6 : 0.85;
       renderer.render({ scene: mesh });
     };
     animateId = requestAnimationFrame(update);

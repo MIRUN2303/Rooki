@@ -3858,5 +3858,4 @@ button { -webkit-tap-highlight-color: transparent; }
 
 /* move strands up slightly */
 .core-canvas {
-  transform: translateY(-8vh);
 }
