@@ -100,7 +100,7 @@ async function ytSearchQueue(q: string, host: "ytm" | "yt", noShorts = false): P
     const seen = new Set<string>();
     const re = /"videoId":"([a-zA-Z0-9_-]{11})"/g;
     let m: RegExpExecArray | null;
-    while ((m = re.exec(html)) && ids.length < 6) {
+    while ((m = re.exec(html))) {
       if (!seen.has(m[1])) {
         seen.add(m[1]);
         ids.push(m[1]);

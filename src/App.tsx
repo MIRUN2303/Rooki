@@ -842,8 +842,10 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     setImages([]);
     setImagesLoading(true);
     setChart(null);
-    setMedia(null);
-    setMediaOpen(false);
+    /* media keeps playing — only "stop" or a new play request clears it */
+    if (!/play|song|music|video|pause|resume|next|previous/i.test(raw)) {
+      setMediaOpen(false);
+    }
     setDataOpen(false);
     setResearchOpen(false);
     if (anyProviderConfigured(settings)) {

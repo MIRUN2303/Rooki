@@ -4,6 +4,7 @@ import type { Bi, ChartData, Lang, ResearchResult, SourceRef, Stat } from "./eng
 import type { ImageRef } from "./research";
 import type { MediaItem } from "./tools";
 
+
 const PALETTE = ["#7c5cff", "#35e0ff", "#c86bff", "#4d7fff", "#8b7dff", "#58eaff"];
 
 const loc = (b: Bi, lang: Lang) => b[lang];
@@ -544,93 +545,78 @@ function MediaWidget({ media, lang }: { media: MediaItem | null; lang: Lang }) {
   const upNext = queue ? queue.slice(idx + 1, idx + 3) : [];
 
   return (
-    <>
-      <div
-        ref={wrapRef}
-        className={`media-frame-wrap${maximized ? " maxed" : ""}`}
-        style={{ position: "relative" }}
-      >
-        <iframe
-          key={`${currentId}-${idx}`}
-          ref={frameRef}
-          className="media-frame"
-          src={`https://www.youtube.com/embed/${currentId}?autoplay=1&enablejsapi=1&rel=0`}
-          title={currentTitle}
-          allow="autoplay; encrypted-media; picture-in-picture"
-          allowFullScreen
-          style={{ position: "relative", zIndex: 1, border: 0 }}
-        />
-        <button
-          className="media-max-btn"
-          onClick={toggleMaximize}
-          aria-label={maximized ? "exit fullscreen" : "maximize video"}
-          title={maximized ? "Exit fullscreen" : "Maximize"}
-        >
-          {maximized ? (
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
-              <path d="M5 1H1v4M9 1h4v4M5 13H1V9M9 13h4V9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            </svg>
-          ) : (
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
-              <path d="M1 5V1h4M13 5V1H9M1 9v4h4M13 9v4H9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            </svg>
-          )}
-        </button>
-      </div>
+    <div className="retro-tv">
 
-      {/* now playing + transport */}
-      <div className="media-card">
-        <div className="media-meta">
-          <b className="media-title">{queue ? `▶ ${currentTitle}` : currentTitle}</b>
-          <span className="media-artist">
-            {media?.kind === "music"
-              ? lang === "en" ? "YouTube Music" : "YouTube 音乐"
-              : lang === "en" ? "YouTube" : "YouTube"}
-            {queue && queue.length > 1 ? ` · ${idx + 1}/${queue.length}` : ""}
-          </span>
+      {/* TV body */}
+      <div className="rtv-body">
+        {/* wood grain top strip */}
+        <div className="rtv-top-grain" />
+
+        {/* screen frame — video + controls in ONE frame */}
+        <div className="rtv-screen-frame">
+          <div className="rtv-screen" ref={wrapRef}>
+            <iframe
+              key={`${currentId}-${idx}`}
+              ref={frameRef}
+              src={`https://www.youtube.com/embed/${currentId}?autoplay=1&enablejsapi=1&rel=0`}
+              title={currentTitle}
+              allow="autoplay; encrypted-media; picture-in-picture"
+              allowFullScreen
+              className="rtv-iframe"
+            />
+            {/* glass reflection */}
+            <div className="rtv-glass-overlay" />
+            {/* scanlines */}
+            <div className="rtv-scanlines" />
+          </div>
+          {/* channel label */}
+          <div className="rtv-channel-label">CH {idx + 1}</div>
+
+          {/* control strip — same frame, directly under video */}
+          <div className="rtv-control-strip">
+            <button className="rtv-dial" onClick={() => step(-1)} disabled={!queue || idx <= 0} aria-label="previous">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M12 2.8v10.4c0 .6-.7 1-1.2.6l-6-4.7a.8.8 0 010-1.3l6-4.7c.5-.4 1.2 0 1.2.7zM3 2.5h1.6v11H3z"/></svg>
+            </button>
+            <button className="rtv-dial rtv-dial-pause" onClick={() => ytCommand("pauseVideo")} aria-label="pause">
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="2.5" width="3.4" height="11" rx="1"/><rect x="9.6" y="2.5" width="3.4" height="11" rx="1"/></svg>
+            </button>
+            <button className="rtv-dial rtv-dial-play" onClick={() => ytCommand("playVideo")} aria-label="play">
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M5 2.8v10.4c0 .6.7 1 1.2.6l8-5.2c.5-.3.5-1 0-1.3l-8-5.2c-.5-.3-1.2.1-1.2.7z"/></svg>
+            </button>
+            <button className="rtv-dial" onClick={() => step(1)} disabled={!queue || !upNext.length} aria-label="next">
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.8v10.4c0 .6.7 1 1.2.6l6-4.7a.8.8 0 000-1.3l-6-4.7C4.7 2.4 4 2.8 4 3.5zM11.4 2.5H13v11h-1.6z"/></svg>
+            </button>
+            <button className="rtv-dial" onClick={toggleMaximize} aria-label="maximize">
+              <svg width="10" height="10" viewBox="0 0 14 14" fill="none"><path d="M1 5V1h4M13 5V1H9M1 9v4h4M13 9v4H9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
+            </button>
+          </div>
         </div>
-        <div className="media-controls">
-          <button className="media-play-btn" onClick={() => step(-1)} disabled={!queue || idx <= 0} aria-label="previous">
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M12 2.8v10.4c0 .6-.7 1-1.2.6l-6-4.7a.8.8 0 010-1.3l6-4.7c.5-.4 1.2 0 1.2.7zM3 2.5h1.6v11H3z"/></svg>
-          </button>
-          <button className="media-play-btn" onClick={() => ytCommand("pauseVideo")} aria-label="pause">
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="2.5" width="3.4" height="11" rx="1"/><rect x="9.6" y="2.5" width="3.4" height="11" rx="1"/></svg>
-          </button>
-          <button className="media-play-btn" onClick={() => ytCommand("playVideo")} aria-label="play">
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M5 2.8v10.4c0 .6.7 1 1.2.6l8-5.2c.5-.3.5-1 0-1.3l-8-5.2c-.5-.3-1.2.1-1.2.7z"/></svg>
-          </button>
-          <button className="media-play-btn" onClick={() => step(1)} disabled={!queue || !upNext.length} aria-label="next">
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.8v10.4c0 .6.7 1 1.2.6l6-4.7a.8.8 0 000-1.3l-6-4.7C4.7 2.4 4 2.8 4 3.5zM11.4 2.5H13v11h-1.6z"/></svg>
-          </button>
-          <button className="media-play-btn" onClick={toggleMaximize} aria-label="maximize">
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M1 5V1h4M13 5V1H9M1 9v4h4M13 9v4H9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
-          </button>
+
+        {/* now playing title bar */}
+        <div className="rtv-title-bar">
+          <b>{currentTitle}</b>
+          {queue && queue.length > 1 && <span>{idx + 1}/{queue.length}</span>}
         </div>
       </div>
 
-      {/* UP NEXT — only two items, rest stays internal */}
-      {queue && upNext.length > 0 && (
-        <ul className="media-list">
+      {/* legs */}
+      <div className="rtv-legs">
+        <span className="rtv-leg-leg rtv-leg-l" />
+        <span className="rtv-leg-leg rtv-leg-r" />
+      </div>
+
+      {/* queue — scrollable independently */}
+      {upNext.length > 0 && (
+        <div className="rtv-queue-wrap">
+          <span className="rtv-queue-header">UP NEXT</span>
           {upNext.map((t, i) => (
-            <li key={t.videoId} className="media-list-item" style={{ opacity: 0.75 }}>
-              <img className="media-thumb" src={`https://i.ytimg.com/vi/${t.videoId}/mqdefault.jpg`} alt="" />
-              <span className="media-list-meta"><b>{t.title}</b></span>
-              <span className="media-up-next-tag">{lang === "en" ? "UP NEXT" : "接下来"}</span>
-              <button className="media-mini-btn" onClick={() => setIdx(idx + 1 + i)} aria-label={`play ${t.title}`}>
-                <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M5 2.8v10.4c0 .6.7 1 1.2.6l8-5.2c.5-.3.5-1 0-1.3l-8-5.2c-.5-.3-1.2.1-1.2.7z"/></svg>
-              </button>
-            </li>
+            <button key={t.videoId} className="rtv-queue-item" onClick={() => setIdx(idx + 1 + i)}>
+              <img src={`https://i.ytimg.com/vi/${t.videoId}/mqdefault.jpg`} alt="" />
+              <span>{t.title}</span>
+            </button>
           ))}
-        </ul>
+        </div>
       )}
-
-      <footer className="panel-foot">
-        <span>
-          {media?.kind === "music"
-            ? lang === "en" ? "Playing from YouTube Music" : "从 YouTube Music 播放"
-            : lang === "en" ? "Playing from YouTube" : "从 YouTube 播放"}
-        </span>
-      </footer>
-    </>
+    </div>
   );
 }
