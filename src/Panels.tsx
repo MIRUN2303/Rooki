@@ -423,59 +423,161 @@ export function DataPanel({
 }
 
 /* ---------------- media (music/video) widget ---------------- */
-/* Uses YouTube Music for audio, YouTube for video — no external redirects */
+/* One authoritative player. Reads queue/index from the MediaItem the tool
+   produced, advances tracks internally, and answers voice commands arriving
+   on the "rooki-media" window event dispatched by media.control. */
 
 function MediaWidget({ media, lang }: { media: MediaItem | null; lang: Lang }) {
-  if (!media) return null;
-  
-  const track = media.track ?? null;
-  const isMusic = media.kind === "music";
-  const isVideo = media.kind === "video";
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const [idx, setIdx] = useState<number>(media?.index ?? 0);
+  const [maximized, setMaximized] = useState(false);
+
+  const queue = media?.queue?.length ? media.queue : null;
+  const currentId =
+    queue && idx >= 0 && idx < queue.length
+      ? queue[idx].videoId
+      : media?.embedUrl?.match(/embed\/([a-zA-Z0-9_-]{11})/)?.[1];
+  const currentTitle = queue?.[idx]?.title ?? media?.track?.title ?? media?.query ?? "";
+
+  /* reset index when a NEW search replaces the item */
+  useEffect(() => {
+    setIdx(media?.index ?? 0);
+  }, [media?.query, media?.kind]);
+
+  const ytCommand = (func: string) => {
+    frameRef.current?.contentWindow?.postMessage(
+      JSON.stringify({ event: "command", func, args: [] }),
+      "*"
+    );
+  };
+
+  const step = (d: number) => {
+    if (!queue) return;
+    setIdx((i) => Math.min(queue.length - 1, Math.max(0, i + d)));
+  };
+
+  const toggleMaximize = () => {
+    try {
+      if (!document.fullscreenElement) {
+        wrapRef.current?.requestFullscreen().then(() => setMaximized(true)).catch(() => {});
+      } else {
+        document.exitFullscreen().finally(() => setMaximized(false));
+      }
+    } catch {
+      /* fullscreen unavailable — compact mode keeps working */
+    }
+  };
+  useEffect(() => {
+    const fs = () => setMaximized(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", fs);
+    return () => document.removeEventListener("fullscreenchange", fs);
+  }, []);
+
+  /* voice control events from media.control */
+  useEffect(() => {
+    const onMedia = (e: Event) => {
+      const action = (e as CustomEvent<{ action: string }>).detail?.action;
+      if (!action) return;
+      (window as unknown as { __rookiMediaHandled?: boolean }).__rookiMediaHandled = true;
+      if (action === "pause") ytCommand("pauseVideo");
+      else if (action === "resume" || action === "play") ytCommand("playVideo");
+      else if (action === "next") step(1);
+      else if (action === "previous") step(-1);
+    };
+    window.addEventListener("rooki-media", onMedia);
+    return () => window.removeEventListener("rooki-media", onMedia);
+  });
+
+  if (!currentId) return null;
+  const upNext = queue ? queue.slice(idx + 1, idx + 3) : [];
 
   return (
     <>
-      {/* YouTube iframe for both music and video */}
-      {media.embedUrl && (
-        <div className="media-frame-wrap">
-          <iframe
-            className="media-frame"
-            src={media.embedUrl}
-            title={isMusic ? "YouTube Music" : "YouTube Video"}
-            allow="autoplay; encrypted-media; picture-in-picture"
-            allowFullScreen
-          />
-        </div>
-      )}
-
-      {/* Track info card */}
-      {track && (
-        <div className="media-card">
-          {track.artwork ? (
-            <img className="media-art" src={track.artwork} alt={track.title} />
+      <div
+        ref={wrapRef}
+        className={`media-frame-wrap${maximized ? " maxed" : ""}`}
+        style={{ position: "relative" }}
+      >
+        <iframe
+          key={`${currentId}-${idx}`}
+          ref={frameRef}
+          className="media-frame"
+          src={`https://www.youtube.com/embed/${currentId}?autoplay=1&enablejsapi=1&rel=0`}
+          title={currentTitle}
+          allow="autoplay; encrypted-media; picture-in-picture"
+          allowFullScreen
+          style={{ position: "relative", zIndex: 1, border: 0 }}
+        />
+        <button
+          className="media-max-btn"
+          onClick={toggleMaximize}
+          aria-label={maximized ? "exit fullscreen" : "maximize video"}
+          title={maximized ? "Exit fullscreen" : "Maximize"}
+        >
+          {maximized ? (
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+              <path d="M5 1H1v4M9 1h4v4M5 13H1V9M9 13h4V9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            </svg>
           ) : (
-            <div className="media-art media-art-empty" />
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+              <path d="M1 5V1h4M13 5V1H9M1 9v4h4M13 9v4H9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            </svg>
           )}
-          <div className="media-meta">
-            <b className="media-title">{track.title}</b>
-            <span className="media-artist">{track.artist}</span>
-          </div>
-          <div className="media-controls">
-            <span className="media-source-badge">
-              {isMusic ? "YouTube Music" : "YouTube"}
-            </span>
-          </div>
+        </button>
+      </div>
+
+      {/* now playing + transport */}
+      <div className="media-card">
+        <div className="media-meta">
+          <b className="media-title">{queue ? `▶ ${currentTitle}` : currentTitle}</b>
+          <span className="media-artist">
+            {media?.kind === "music"
+              ? lang === "en" ? "YouTube Music" : "YouTube 音乐"
+              : lang === "en" ? "YouTube" : "YouTube"}
+            {queue && queue.length > 1 ? ` · ${idx + 1}/${queue.length}` : ""}
+          </span>
         </div>
+        <div className="media-controls">
+          <button className="media-play-btn" onClick={() => step(-1)} disabled={!queue || idx <= 0} aria-label="previous">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M12 2.8v10.4c0 .6-.7 1-1.2.6l-6-4.7a.8.8 0 010-1.3l6-4.7c.5-.4 1.2 0 1.2.7zM3 2.5h1.6v11H3z"/></svg>
+          </button>
+          <button className="media-play-btn" onClick={() => ytCommand("pauseVideo")} aria-label="pause">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="2.5" width="3.4" height="11" rx="1"/><rect x="9.6" y="2.5" width="3.4" height="11" rx="1"/></svg>
+          </button>
+          <button className="media-play-btn" onClick={() => ytCommand("playVideo")} aria-label="play">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M5 2.8v10.4c0 .6.7 1 1.2.6l8-5.2c.5-.3.5-1 0-1.3l-8-5.2c-.5-.3-1.2.1-1.2.7z"/></svg>
+          </button>
+          <button className="media-play-btn" onClick={() => step(1)} disabled={!queue || !upNext.length} aria-label="next">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.8v10.4c0 .6.7 1 1.2.6l6-4.7a.8.8 0 000-1.3l-6-4.7C4.7 2.4 4 2.8 4 3.5zM11.4 2.5H13v11h-1.6z"/></svg>
+          </button>
+          <button className="media-play-btn" onClick={toggleMaximize} aria-label="maximize">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M1 5V1h4M13 5V1H9M1 9v4h4M13 9v4H9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
+          </button>
+        </div>
+      </div>
+
+      {/* UP NEXT — only two items, rest stays internal */}
+      {queue && upNext.length > 0 && (
+        <ul className="media-list">
+          {upNext.map((t, i) => (
+            <li key={t.videoId} className="media-list-item" style={{ opacity: 0.75 }}>
+              <img className="media-thumb" src={`https://i.ytimg.com/vi/${t.videoId}/mqdefault.jpg`} alt="" />
+              <span className="media-list-meta"><b>{t.title}</b></span>
+              <span className="media-up-next-tag">{lang === "en" ? "UP NEXT" : "接下来"}</span>
+              <button className="media-mini-btn" onClick={() => setIdx(idx + 1 + i)} aria-label={`play ${t.title}`}>
+                <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M5 2.8v10.4c0 .6.7 1 1.2.6l8-5.2c.5-.3.5-1 0-1.3l-8-5.2c-.5-.3-1.2.1-1.2.7z"/></svg>
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
 
       <footer className="panel-foot">
         <span>
-          {isMusic
-            ? lang === "en"
-              ? "Playing from YouTube Music"
-              : "从 YouTube Music 播放"
-            : lang === "en"
-              ? "Playing from YouTube"
-              : "从 YouTube 播放"}
+          {media?.kind === "music"
+            ? lang === "en" ? "Playing from YouTube Music" : "从 YouTube Music 播放"
+            : lang === "en" ? "Playing from YouTube" : "从 YouTube 播放"}
         </span>
       </footer>
     </>

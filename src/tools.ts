@@ -74,6 +74,59 @@ export interface MediaItem {
   track?: MediaTrack | null;
   playlist?: MediaTrack[] | null;
   embedUrl?: string;
+  /* playback queue — authoritative state lives here; widget reads it */
+  queue?: { videoId: string; title: string }[];
+  index?: number;
+}
+
+/* Scrape a YouTube(/Music) search page through the Vite proxy and pull the
+   result queue: deduped videoIds with titles. Works for songs, videos and
+   "playlist" queries alike — fuzzy against STT spelling noise because it
+   searches YouTube itself. */
+async function ytSearchQueue(q: string, host: "ytm" | "yt"): Promise<{ videoId: string; title: string }[]> {
+  try {
+    const url = host === "ytm"
+      ? `/ytm/search?q=${encodeURIComponent(q)}`
+      : `/yt/results?search_query=${encodeURIComponent(q)}`;
+    const r = await fetch(url, { headers: { "Accept-Language": "en-US,en;q=0.9" } });
+    if (!r.ok) return [];
+    let html = await r.text();
+    /* YouTube embeds ytInitialData as a hex-escaped string (\x7b\x22...) —
+       decode \xHH sequences so videoId JSON becomes matchable */
+    if (!html.includes('"videoId"') && html.includes("\\x")) {
+      html = html.replace(/\\x([0-9a-fA-F]{2})/g, (_m, h) => String.fromCharCode(parseInt(h, 16)));
+    }
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    const re = /"videoId":"([a-zA-Z0-9_-]{11})"/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) && ids.length < 6) {
+      if (!seen.has(m[1])) {
+        seen.add(m[1]);
+        ids.push(m[1]);
+      }
+    }
+    /* hydrate real titles via the official oEmbed endpoint (stable schema),
+       falling back to the query when oEmbed fails */
+    const out = await Promise.all(
+      ids.map(async (videoId) => {
+        let title = q;
+        try {
+          const or = await fetch(`/yt/oembed?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}&format=json`);
+          if (or.ok) {
+            const j = (await or.json()) as { title?: string };
+            if (j.title) title = j.title;
+          }
+        } catch {
+          /* keep fallback */
+        }
+        return { videoId, title };
+      })
+    );
+    return out.filter((v) => v.videoId);
+  } catch {
+    return [];
+  }
 }
 
 /* search YouTube Music for audio (songs, podcasts, playlists) */
@@ -143,6 +196,13 @@ export async function youtubeVideoSearch(q: string): Promise<MediaTrack | null> 
 const TOOLS: ToolDef[] = [
   os("system.brightness_set", "set display brightness to a percent (0-100)", "auto"),
   os("system.brightness_get", "read current display brightness"),
+  os("wifi.status", "check whether Wi-Fi is on and currently connected network state"),
+  os("wifi.list", "list available nearby Wi-Fi networks"),
+  os("wifi.connect", "reconnect Wi-Fi to a saved network profile — args {ssid}"),
+  os("wifi.toggle", "enable or disable the Wi-Fi adapter (may need admin) — args {enabled:true|false}"),
+  os("bt.status", "check Bluetooth radio and connected devices"),
+  os("bt.list", "list paired/known Bluetooth devices with connection status"),
+  os("bt.toggle", "enable or disable Bluetooth radio (needs admin) — args {enabled:true|false}"),
   os("system.volume_delta", "turn volume up or down in relative steps (delta, e.g. 10 or -10)"),
   os("system.volume_mute", "toggle mute"),
   os("system.volume_get", "read current volume percent"),
@@ -161,21 +221,33 @@ const TOOLS: ToolDef[] = [
   os("files.open", "open a file with its default app"),
   {
     name: "media.control",
-    desc: "control playback: args {action: 'pause'|'resume'|'next'|'previous'}",
+    desc: "control the active Rooki player: args {action: 'pause'|'resume'|'next'|'previous'} — routes to the in-app media widget when one is open",
     permission: "auto",
     run: async (args) => {
       const action = String(args.action ?? "").trim().toLowerCase();
-      const bridge = action === "pause" || action === "resume" ? "media.play_pause" : `media.${action}`;
-      if (!["media.play_pause", "media.next", "media.previous"].includes(bridge)) {
+      if (!["pause", "resume", "play", "next", "previous"].includes(action)) {
         return { ok: false, error: `unknown action: ${action}`, unsupported: true };
       }
+      /* in-app widget first (authoritative when open) */
+      window.dispatchEvent(new CustomEvent("rooki-media", { detail: { action } }));
+      await new Promise((r) => setTimeout(r, 60));
+      const handled = (window as unknown as { __rookiMediaHandled?: boolean }).__rookiMediaHandled === true;
+      (window as unknown as { __rookiMediaHandled?: boolean }).__rookiMediaHandled = false;
+      if (handled) return { ok: true, data: { action, applied: true, via: "widget" } };
+      /* no widget — fall back to OS media keys (Spotify/YouTube tab/etc.) */
+      const bridge = action === "pause" || action === "resume" ? "media.play_pause" : `media.${action}`;
+      if (!["media.play_pause", "media.next", "media.previous"].includes(bridge)) {
+        return { ok: false, error: `no active Rooki player and '${action}' has no OS equivalent`, unsupported: true };
+      }
       const res = await callAgent(bridge, {});
-      if (res.ok) res.data = { action, applied: true };
+      if (res.ok) res.data = { action, applied: true, via: "os" };
+      else res.error = res.error ?? "no media player is currently active";
       return res;
     },
     render: (d) => {
-      const r = d as { action: string };
-      return `${r.action === "pause" ? "paused" : r.action === "resume" ? "resumed" : r.action} playback`;
+      const r = d as { action: string; applied?: boolean; via?: string };
+      const verb = r.action === "pause" ? "paused" : r.action === "resume" || r.action === "play" ? "resumed" : `${r.action} track in`;
+      return `${verb} playback${r.via ? ` (${r.via})` : ""}`;
     },
   },
 
@@ -370,40 +442,65 @@ const TOOLS: ToolDef[] = [
     run: async (args, deps) => {
       const q = String(args.query ?? "").trim();
       if (!q) return { ok: false, error: "no query", unsupported: true };
+      const queue = await ytSearchQueue(q, "yt");
+      if (!queue.length) return { ok: false, error: `no YouTube Music results for "${q}"`, unsupported: true };
       deps.performOpen("music", q, deps.lang);
-      // Search YouTube Music for the song
-      const track = await youtubeMusicSearch(q);
+      const first = queue[0];
       return {
         ok: true,
-        data: { query: q, kind: "music", action: "playing", track } as MediaItem,
+        data: {
+          query: q,
+          kind: "music",
+          action: "playing",
+          track: {
+            title: first.title,
+            artist: "",
+            artwork: `https://i.ytimg.com/vi/${first.videoId}/hqdefault.jpg`,
+            videoId: first.videoId,
+            thumbnail: `https://i.ytimg.com/vi/${first.videoId}/mqdefault.jpg`,
+          },
+          embedUrl: `https://www.youtube.com/embed/${first.videoId}?autoplay=1&enablejsapi=1`,
+          queue,
+          index: 0,
+        } as MediaItem,
       };
     },
     render: (d) => {
-      const r = d as { query: string; kind: string; action: string; track?: MediaTrack | null };
-      return r.track ? `${r.action} music: "${r.track.title}" by ${r.track.artist}` : `${r.action} music: "${s80(r.query)}"`;
+      const r = d as { query: string; kind: string; action: string; track?: MediaTrack | null; queue?: unknown[] };
+      const n = Array.isArray(r.queue) ? r.queue.length : 0;
+      return r.track
+        ? `${r.action} music: "${r.track.title}"${n > 1 ? ` (+${n - 1} queued)` : ""}`
+        : `${r.action} music: "${s80(r.query)}"`;
     },
   },
   {
     name: "video.play",
-    desc: "search and play a video through the Rooki YouTube player. Use when the user wants to watch a video, music video, tutorial, or any YouTube content — loads the result into the video widget and autoplays",
+    desc: "search and play a video through the Rooki YouTube player. Use when the user wants to watch a video, music video, tutorial, playlist of videos, or any YouTube content — loads the result into the video widget and autoplays",
     permission: "auto",
     run: async (args, deps) => {
       const q = String(args.query ?? "").trim();
       if (!q) return { ok: false, error: "no query", unsupported: true };
+      let queue = await ytSearchQueue(q, "yt");
+      if (!queue.length) queue = await ytSearchQueue(q + " video", "yt");
+      if (!queue.length) return { ok: false, error: `no YouTube results for "${q}"`, unsupported: true };
       deps.performOpen("youtube", q, deps.lang);
-      // Search YouTube for the video
-      const track = await youtubeVideoSearch(q);
-      const videoId = track?.videoId ?? "";
+      const first = queue[0];
       return {
         ok: true,
         data: {
           query: q,
           kind: "video",
           action: "playing",
-          track,
-          embedUrl: videoId
-            ? `https://www.youtube.com/embed/${videoId}?autoplay=1`
-            : `https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(q)}`,
+          track: {
+            title: first.title,
+            artist: "",
+            artwork: `https://i.ytimg.com/vi/${first.videoId}/hqdefault.jpg`,
+            videoId: first.videoId,
+            thumbnail: `https://i.ytimg.com/vi/${first.videoId}/mqdefault.jpg`,
+          },
+          embedUrl: `https://www.youtube.com/embed/${first.videoId}?autoplay=1&enablejsapi=1`,
+          queue,
+          index: 0,
         } as MediaItem,
       };
     },

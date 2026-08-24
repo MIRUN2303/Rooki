@@ -63,12 +63,68 @@ function Find-Apps($name) {
   Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -and $_.ProcessName -like "*$match*" }
 }
 
+# ---------- exact volume via Core Audio (IAudioEndpointVolume) ----------
+# ponytail: single Add-Type CoreAudio helper; if compile/COM fails on a given
+# runtime we fall back to the media-key path and report honestly.
+if (-not ("RookiCoreAudio" -as [type])) {
+  try { Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioEndpointVolume {
+    int RegisterControlChangeNotify(IntPtr n);
+    int UnregisterControlChangeNotify(IntPtr n);
+    int GetChannelCount(out uint c);
+    int SetMasterVolumeLevel(float db, Guid ctx);
+    int SetMasterVolumeLevelScalar(float level, Guid ctx);
+    int GetMasterVolumeLevel(out float db);
+    int GetMasterVolumeLevelScalar(out float level);
+    int SetChannelVolumeLevel(uint ch, float db, Guid ctx);
+    int SetChannelVolumeLevelScalar(uint ch, float level, Guid ctx);
+    int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, Guid ctx);
+    int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+}
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDevice { int Activate(ref Guid iid, int cls, IntPtr p, out IAudioEndpointVolume epv); }
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDeviceEnumerator {
+    int EnumAudioEndpoints(int df, int mask, out IntPtr devs);
+    int GetDefaultAudioEndpoint(int df, int role, out IMMDevice dev);
+}
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator {}
+public static class RookiCoreAudio {
+    static IAudioEndpointVolume Vol() {
+        var en = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        IMMDevice d; Marshal.ThrowExceptionForHR(en.GetDefaultAudioEndpoint(0, 1, out d));
+        var g = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+        IAudioEndpointVolume v; Marshal.ThrowExceptionForHR(d.Activate(ref g, 0x17, IntPtr.Zero, out v));
+        return v;
+    }
+    public static double Get() { float l; Marshal.ThrowExceptionForHR(Vol().GetMasterVolumeLevelScalar(out l)); return Math.Round(l * 100.0); }
+    public static void Set(double pct) { Marshal.ThrowExceptionForHR(Vol().SetMasterVolumeLevelScalar((float)(Math.Max(0, Math.Min(100, pct)) / 100.0), Guid.Empty)); }
+    public static bool Muted() { bool m; Marshal.ThrowExceptionForHR(Vol().GetMute(out m)); return m; }
+    public static void SetMute(bool m) { Marshal.ThrowExceptionForHR(Vol().SetMute(m, Guid.Empty)); }
+}
+"@ -ErrorAction Stop } catch { }
+}
+function Test-CoreAudio { return ("RookiCoreAudio" -as [type]) -ne $null }
+
 switch ($tool) {
   "system.volume_get" {
-    Fail "exact volume level is not readable on this system (Core Audio interop unavailable)" $true
+    if (Test-CoreAudio) {
+      try { $v = [RookiCoreAudio]::Get(); $m = $null; try { $m = [RookiCoreAudio]::Muted() } catch {}; Out-J ([ordered]@{ ok = $true; data = [ordered]@{ volume = $v; muted = $m } }) }
+      catch { Fail "Core Audio read failed: $_" $false }
+    } else { Fail "exact volume level is not readable on this system (Core Audio interop unavailable)" $true }
   }
   "system.volume_set" {
-    Fail "exact volume level cannot be set on this system (Core Audio interop unavailable)" $true
+    if (Test-CoreAudio) {
+      try {
+        $pct = [Math]::Max(0, [Math]::Min(100, [double]$args_.pct))
+        [RookiCoreAudio]::Set($pct)
+        Start-Sleep -Milliseconds 150
+        Out-J ([ordered]@{ ok = $true; data = [ordered]@{ volume = [RookiCoreAudio]::Get() }; verified = $true })
+      } catch { Fail "Core Audio set failed: $_" $false }
+    } else { Fail "exact volume cannot be set on this system (Core Audio interop unavailable)" $true }
   }
   "system.volume_delta" {
     $steps = [Math]::Min(20, [Math]::Max(1, [Math]::Abs([int]$args_.delta)))
@@ -81,11 +137,23 @@ switch ($tool) {
     Out-J ([ordered]@{ ok = $true; data = [ordered]@{ applied = $steps; note = "relative steps; exact level cannot be read back on this system" } })
   }
   "system.volume_mute" {
-    [Native]::keybd_event(0xAD, 0, 0, [UIntPtr]::Zero)
-    [Native]::keybd_event(0xAD, 0, 2, [UIntPtr]::Zero)
-    Out-J ([ordered]@{ ok = $true; data = [ordered]@{ action = "volume mute toggle key sent" } })
-  }
-  "system.brightness_get" {
+    if (Test-CoreAudio) {
+      try {
+        $muteArg = $args_.mute
+        if ($null -eq $muteArg) { throw "toggle-only" }
+        [RookiCoreAudio]::SetMute([bool]$muteArg)
+        Out-J ([ordered]@{ ok = $true; data = [ordered]@{ muted = [bool]$muteArg }; verified = $true })
+      } catch {
+        [Native]::keybd_event(0xAD, 0, 0, [UIntPtr]::Zero)
+        [Native]::keybd_event(0xAD, 0, 2, [UIntPtr]::Zero)
+        Out-J ([ordered]@{ ok = $true; data = [ordered]@{ action = "mute toggled via media key (driver does not expose exact mute state)" } })
+      }
+    } else {
+      [Native]::keybd_event(0xAD, 0, 0, [UIntPtr]::Zero)
+      [Native]::keybd_event(0xAD, 0, 2, [UIntPtr]::Zero)
+      Out-J ([ordered]@{ ok = $true; data = [ordered]@{ action = "volume mute toggle key sent" } })
+    }
+  }  "system.brightness_get" {
     try {
       $b = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightness -ErrorAction Stop
       Out-J ([ordered]@{ ok = $true; data = [ordered]@{ brightness = $b.CurrentBrightness } })
@@ -100,6 +168,56 @@ switch ($tool) {
       $b = Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightness
       Out-J ([ordered]@{ ok = $true; data = [ordered]@{ brightness = $b.CurrentBrightness }; verified = ([Math]::Abs($b.CurrentBrightness - $pct) -le 5) })
     } catch { Fail "brightness not supported on this display" $true }
+  }
+  "wifi.status" {
+    $i = netsh wlan show interfaces | Select-String "SSID|State|Signal"
+    if (-not $i) { Fail "Wi-Fi is off or no wireless adapter present" $false }
+    Out-J ([ordered]@{ ok = $true; data = [ordered]@{ raw = @($i -join "`n") } })
+  }
+  "wifi.list" {
+    $n = netsh wlan show networks | Select-String "SSID" | ForEach-Object { ($_ -split ':',2)[1].Trim() } | Where-Object { $_ } | Select-Object -Unique
+    Out-J ([ordered]@{ ok = $true; data = @($n) })
+  }
+  "wifi.connect" {
+    $ssid = "$($args_.ssid)".Trim()
+    if (-not $ssid) { Fail "ssid required" $false }
+    $p = netsh wlan show profiles | Select-String "\:\s*(.+)$" | ForEach-Object { ($_ -split ':',2)[1].Trim() }
+    if ($p -notcontains $ssid) { Fail "no saved profile for '$ssid' — connect once manually so Windows stores it, then I can reconnect" $false }
+    $r = netsh wlan connect name="$ssid"
+    Start-Sleep -Seconds 4
+    $ok = (netsh wlan show interfaces | Select-String "State") -match "connected"
+    Out-J ([ordered]@{ ok = $true; data = [ordered]@{ ssid = $ssid; connected = [bool]$ok; detail = ($r -join " ") }; verified = [bool]$ok })
+  }
+  "wifi.toggle" {
+    $on = ($args_.enabled -ne $false)
+    $adapters = Get-NetAdapter | Where-Object { $_.MediaType -eq "802.11" }
+    if (-not $adapters) { Fail "no Wi-Fi adapter found" $false }
+    foreach ($a in $adapters) { if ($on) { Enable-NetAdapter -Name $a.Name -Confirm:$false } else { Disable-NetAdapter -Name $a.Name -Confirm:$false } }
+    Start-Sleep -Seconds 2
+    $now = Get-NetAdapter | Where-Object { $_.MediaType -eq "802.11" } | Select-Object -First 1
+    Out-J ([ordered]@{ ok = $true; data = [ordered]@{ enabled = ($now.Status -eq "Up"); note = "requires admin rights if this failed" } })
+  }
+  "bt.status" {
+    $devs = Get-PnpDevice -Class Bluetooth -PresentOnly -ErrorAction SilentlyContinue
+    if (-not $devs) { Fail "no Bluetooth radio/devices found" $true }
+    Out-J ([ordered]@{ ok = $true; data = [ordered]@{
+      radio = ($devs | Where-Object FriendlyName -like "*Bluetooth*").Count -gt 0
+      devices = @($devs | ForEach-Object { [ordered]@{ name = $_.FriendlyName; status = $_.Status } })
+    } })
+  }
+  "bt.list" {
+    $d = Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -notlike "*Bluetooth*Generic*" }
+    Out-J ([ordered]@{ ok = $true; data = @($d | ForEach-Object { [ordered]@{ name = $_.FriendlyName; status = $_.Status; connected = ($_.Status -eq "OK") } }) })
+  }
+  "bt.toggle" {
+    $on = ($args_.enabled -ne $false)
+    $radio = Get-PnpDevice -Class Bluetooth -PresentOnly -ErrorAction SilentlyContinue | Where-Object FriendlyName -match "Bluetooth" | Select-Object -First 1
+    if (-not $radio) { Fail "no Bluetooth radio found" $false }
+    try {
+      if ($on) { Enable-PnpDevice -InstanceId $radio.InstanceId -Confirm:$false -ErrorAction Stop }
+      else { Disable-PnpDevice -InstanceId $radio.InstanceId -Confirm:$false -ErrorAction Stop }
+      Out-J ([ordered]@{ ok = $true; data = [ordered]@{ enabled = $on }; verified = $true })
+    } catch { Fail "toggling Bluetooth requires admin rights — run Rooki's agent elevated for this" $false }
   }
   "system.info" {
     $os = Get-CimInstance Win32_OperatingSystem
