@@ -70,6 +70,8 @@ import type { MicResult } from "./voice";
 import { callAgent } from "./agent";
 import { youtubeMusicSearch, youtubeVideoSearch, type MediaItem } from "./tools";
 import BootScreen from "./BootScreen";
+import SchedulerPanel, { SchedulerToasts } from "./SchedulerPanel";
+import { startScheduler } from "./scheduler";
 
 const loc = (b: Bi, lang: Lang) => b[lang];
 
@@ -111,6 +113,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [trace, setTrace] = useState<TurnTrace[]>([]);
   const [debugOpen, setDebugOpen] = useState(false);
+  const [schedOpen, setSchedOpen] = useState(false);
 
   const langRef = useRef<Lang>("en");
   const phaseRef = useRef<VoiceState>("idle");
@@ -149,6 +152,19 @@ export default function App() {
   };
 
   useEffect(() => () => { clearTimers(); stopMic(); }, []);
+
+  /* scheduler engine — restart recovery + due-task firing */
+  useEffect(() => {
+    if (!booted) return;
+    startScheduler();
+  }, [booted]);
+
+  /* tools open the panel contextually (scheduler.create / list) */
+  useEffect(() => {
+    const onOpen = () => setSchedOpen(true);
+    window.addEventListener("rooki-scheduler-open", onOpen);
+    return () => window.removeEventListener("rooki-scheduler-open", onOpen);
+  }, []);
 
   /* session summary on leave — consumed once at next boot, never repeats */
   useEffect(() => {
@@ -889,6 +905,17 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
         </button>
         <button
           className="icon-btn"
+          onClick={() => setSchedOpen((v) => !v)}
+          title="scheduler"
+          aria-label="open scheduler"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6.2" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M8 4.5V8l2.4 1.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+        </button>
+        <button
+          className="icon-btn"
           onClick={() => setSettingsOpen(true)}
           title="settings"
           aria-label="open settings"
@@ -918,7 +945,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
         </section>
       </main>
 
-      <div className="panel-stack">
+        <div className={`panel-stack${schedOpen ? " sched-mode" : ""}`}>
         <div className="carousel-tabs">
           <button
             className={`carousel-tab${rightTab === "research" ? " active" : ""}`}
@@ -967,6 +994,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
             />
           </div>
         </div>
+        <SchedulerPanel open={schedOpen} onClose={() => setSchedOpen(false)} />
       </div>
 
       <div className="panel-stack left">
@@ -982,6 +1010,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
           }}
         />
       </div>
+
 
       <ChatPanel
         messages={messages}
@@ -1009,6 +1038,8 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
           answer(langRef.current === "zh" ? "记忆已清空。" : "Memory cleared.");
         }}
       />
+
+      <SchedulerToasts />
 
       {import.meta.env.DEV && (
         <button

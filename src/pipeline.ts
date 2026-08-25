@@ -36,6 +36,7 @@ import {
   type ToolDeps,
   type ToolResult,
 } from "./tools";
+import { listTasks, describeTrigger } from "./scheduler";
 
 /* ---------------- working memory (session-only, AI-visible) ---------------- */
 
@@ -59,6 +60,8 @@ export interface WorkingMemory {
   lastTool?: string;
   lastFile?: string;
   lastTs?: number;
+  lastTaskId?: string;
+  lastTaskTitle?: string;
 }
 
 const working: WorkingMemory = {};
@@ -760,6 +763,8 @@ RULES:
 - ACT, DON'T ASK: when intent is clear, assume reasonable defaults and proceed immediately.
 - emotion: match the user's tone; warm and low-energy if they seem tired or lonely.
 - media: "play [song]" or "play music" -> music.play (audio widget, no shorts). "play [X] video", "watch [X]", "video song" -> video.play (video widget with fullscreen). If user mentions "shorts" or "shorts video" -> video.play with "shorts" in the query. Playlist requests ("play playlist", "play tamil playlist") -> same as above but include "playlist" in query; queue auto-advances. If the user mentions "video" ANYWHERE in the request use video.play. Otherwise default to music.play.
+- SCHEDULING: reminders/tasks/calendar -> scheduler.* tools. NEVER refuse a scheduling request and NEVER say you can't set reminders — any future time works. Time forms: "in 3 minutes"/"after 2 minutes" -> {kind:"once", inMinutes:3}; "tomorrow 10am" -> {kind:"once", dayOffset:1, hour:10, minute:0}; "tonight 8" -> {kind:"once", hour:20, minute:0}; "next Monday at 9" -> {kind:"once", weekday:1, hour:9, minute:0} (Sun=0..Sat=6); "every Monday at 9" -> {kind:"weekly", hour:9, minute:0, weekdays:[1]}; weekdays -> weekly with [1,2,3,4,5]. The TOOL does all date math — just pass the relative shape, never compute epoch yourself. References ("that reminder","it","move that") -> scheduler.update/scheduler.cancel/scheduler.snooze (matchTitle from Working state lastTaskTitle, or bare = most recent task). "what do I have tomorrow/today" -> scheduler.list scope:"tomorrow"/"today". If result notes a conflict, mention it briefly and offer an alternative — never reschedule silently.
+- CONFIRMATIONS EXECUTE: if your previous turn OFFERED an action ("shall I...", "want me to...", "how about I...") and the user says yes/yeah/sure/do it/okay — run that action NOW with the same parameters you offered. Never just acknowledge a confirmation.
 - chart/build visuals: only when the user's goal requires visualization. "show this as a chart" -> chart.build. "summarize these numbers" -> text summary.
 - FINAL CHECK: Pick the intent that SERVES the user. If you are confident in your own knowledge, answer directly. Research only when you genuinely need fresh data.`;
 
@@ -776,8 +781,20 @@ async function buildContext(text: string, settings: Settings, lang: "en" | "zh",
     month: "long",
     day: "numeric",
   });
+  const nowTime = new Date().toLocaleTimeString(lang === "zh" ? "zh-CN" : "en-US", { hour: "numeric", minute: "2-digit" });
   const parts: string[] = [];
-  parts.push(`Today: ${today}`);
+  parts.push(`Today: ${today}, ${nowTime}`);
+
+  /* upcoming scheduled tasks — lets "what do I have tomorrow?" answer from context */
+  try {
+    const upcoming = listTasks({ status: ["scheduled", "snoozed"] }).slice(0, 6);
+    if (upcoming.length) {
+      parts.push(
+        "Scheduled: " +
+          upcoming.map((t) => `${t.title} (${t.id.slice(-4)} — ${describeTrigger(t.trigger)})`).join("; ")
+      );
+    }
+  } catch { /* scheduler unavailable */ }
 
   /* entity resolution for references */
   const refMatch = text.match(/\b(it|that|this|there|same|again|the one|previous|last|him|her|them|那个|这个|它|那里|上次|之前)\b/i);
@@ -1101,6 +1118,20 @@ function updateWorkingFromTool(tool: string, args: Record<string, unknown>, res:
       break;
     case "research.last":
       working.lastAction = "research_summary";
+      break;
+    case "scheduler.create":
+    case "scheduler.update": {
+      working.lastAction = "scheduler";
+      const data = res?.data as { id?: string; title?: string } | undefined;
+      if (data?.id) working.lastTaskId = data.id;
+      if (data?.title) working.lastTaskTitle = data.title;
+      break;
+    }
+    case "scheduler.cancel":
+    case "scheduler.complete":
+      working.lastAction = "scheduler";
+      working.lastTaskId = undefined;
+      working.lastTaskTitle = undefined;
       break;
     case "files.read":
       working.lastFile = (args.path ?? "").toString();

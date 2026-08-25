@@ -6,6 +6,11 @@
 
 import { callAgent } from "./agent";
 import {
+  createTask, listTasks, getTask, updateTask, cancelTask, completeTask,
+  snoozeTask, describeTrigger,
+} from "./scheduler";
+import type { ScheduledTask } from "./scheduler";
+import {
   addMemory,
   forgetMemory,
   lastResearchResult,
@@ -656,7 +661,182 @@ Report: ${truncate(report, 5000)}`,
   },
 ];
 
-/* ---------------- quiz (LLM-generated, keeps its own state) ---------------- */
+/* ---------------- scheduler tools (additive capability) ---------------- */
+
+const schedTools: ToolDef[] = [
+  {
+    name: "scheduler.open",
+    desc: "open/show the scheduler & calendar panel",
+    permission: "auto",
+    run: async () => {
+      window.dispatchEvent(new CustomEvent("rooki-scheduler-open"));
+      return { ok: true, verified: true, summary: "calendar opened" };
+    },
+    render: () => "calendar open",
+  },
+  {
+    name: "scheduler.create",
+    desc: "schedule a task/reminder. args: title (string), trigger {kind:\"once\"|\"daily\"|\"weekly\", ONE of: inMinutes (relative, e.g. 3), OR dayOffset (0=today,1=tomorrow) + hour + minute, OR at (epoch ms), OR weekday (0-6) + hour + minute; recurring adds weekdays?: [0-6] for weekly}. optional leadMinutes, durationMin?",
+    permission: "auto",
+    run: async (args) => {
+      const trig = (args.trigger ?? {}) as Record<string, unknown>;
+      const kind = trig.kind === "daily" || trig.kind === "weekly" ? trig.kind : "once";
+      const num = (v: unknown) => (isFinite(Number(v)) ? Number(v) : undefined);
+      let at = num(trig.at);
+      if (kind === "once" && !trig.inMinutes && !trig.dayOffset && trig.weekday == null && (!at || at <= Date.now())) {
+        return { ok: false, error: "trigger needs a FUTURE time: inMinutes=N, or dayOffset+hour+minute, or weekday+hour+minute, or future epoch ms at", unsupported: true };
+      }
+      const { task, conflict } = createTask({
+        title: String(args.title ?? "").trim() || "Reminder",
+        description: args.description ? String(args.description) : undefined,
+        trigger: {
+          kind,
+          at: kind === "once" ? at : undefined,
+          inMinutes: kind === "once" ? num(trig.inMinutes) : undefined,
+          dayOffset: kind === "once" ? num(trig.dayOffset) : undefined,
+          weekday: kind === "once" ? num(trig.weekday) : undefined,
+          hour: trig.hour != null ? Math.max(0, Math.min(23, Number(trig.hour))) : undefined,
+          minute: trig.minute != null ? Math.max(0, Math.min(59, Number(trig.minute))) : undefined,
+          weekdays: Array.isArray(trig.weekdays) ? trig.weekdays.map(Number).filter((n) => n >= 0 && n <= 6) : undefined,
+        },
+        leadMinutes: num(args.leadMinutes),
+        durationMin: num(args.durationMin),
+      });
+      window.dispatchEvent(new CustomEvent("rooki-scheduler-open"));
+      return {
+        ok: true,
+        verified: true,
+        data: { id: task.id, title: task.title, when: task.nextRunAt, recurrence: task.recurrence ?? null, conflict: conflict ? `overlaps "${conflict.conflictingWith.title}" (${conflict.window})` : null },
+        summary: `"${task.title}" ${task.nextRunAt ? new Date(task.nextRunAt).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : describeTrigger(task.trigger)}${conflict ? ` — NOTE: ${conflict.conflictingWith.title} already occupies around that time` : ""}`,
+      };
+    },
+    render: (d) => JSON.stringify(d),
+  },
+  {
+    name: "scheduler.list",
+    desc: "list scheduled tasks/reminders. args: scope? \"today\"|\"tomorrow\"|\"upcoming\"|\"all\" (default upcoming)",
+    permission: "auto",
+    run: async (args) => {
+      const scope = String(args.scope ?? "upcoming");
+      const now = new Date();
+      let from: number | undefined;
+      let to: number | undefined;
+      if (scope === "today") {
+        const f = new Date(now); f.setHours(0, 0, 0, 0);
+        const t2 = new Date(now); t2.setHours(23, 59, 59, 999);
+        from = f.getTime(); to = t2.getTime();
+      } else if (scope === "tomorrow") {
+        const base = new Date(now); base.setDate(base.getDate() + 1);
+        const f = new Date(base); f.setHours(0, 0, 0, 0);
+        const t2 = new Date(base); t2.setHours(23, 59, 59, 999);
+        from = f.getTime(); to = t2.getTime();
+      }
+      const items = listTasks({ status: scope === "all" ? undefined : ["scheduled", "snoozed"], from, to });
+      return {
+        ok: true,
+        data: items.map((t) => ({ id: t.id, title: t.title, when: t.nextRunAt, trigger: describeTrigger(t.trigger), status: t.status })),
+        summary: items.length
+          ? items.slice(0, 5).map((t) => `${t.title} — ${describeTrigger(t.trigger)}`).join("; ") + (items.length > 5 ? ` (+${items.length - 5} more)` : "")
+          : "nothing scheduled in that range",
+      };
+    },
+    render: (d) => JSON.stringify(d),
+  },
+  {
+    name: "scheduler.update",
+    desc: "reschedule/rename an existing task by reference. args: taskId OR matchTitle, then new time via trigger {kind,at,hour,minute,weekdays} and/or title",
+    permission: "auto",
+    run: async (args) => {
+      const t = resolveTaskArg(args);
+      if (!t) return { ok: false, error: "no matching task found", unsupported: true };
+      const trig = args.trigger as Record<string, unknown> | undefined;
+      const patch: Parameters<typeof updateTask>[1] = {};
+      if (args.title) patch.title = String(args.title);
+      if (trig) {
+        const num = (v: unknown) => (isFinite(Number(v)) ? Number(v) : undefined);
+        const kind = trig.kind === "daily" || trig.kind === "weekly" ? trig.kind : "once";
+        patch.trigger = {
+          kind,
+          at: kind === "once" ? num(trig.at) : undefined,
+          inMinutes: kind === "once" ? num(trig.inMinutes) : undefined,
+          dayOffset: kind === "once" ? num(trig.dayOffset) : undefined,
+          weekday: kind === "once" ? num(trig.weekday) : undefined,
+          hour: trig.hour != null ? Math.max(0, Math.min(23, Number(trig.hour))) : undefined,
+          minute: trig.minute != null ? Math.max(0, Math.min(59, Number(trig.minute))) : undefined,
+          weekdays: Array.isArray(trig.weekdays) ? trig.weekdays.map(Number).filter((n) => n >= 0 && n <= 6) : undefined,
+        };
+      }
+      const upd = updateTask(t.id, patch);
+      if (!upd && patch.trigger) return { ok: false, error: "new time must be in the future", unsupported: true };
+      return {
+        ok: true,
+        verified: true,
+        data: { id: t.id, title: upd?.title, when: upd?.nextRunAt, recurrence: upd?.recurrence ?? null },
+        summary: upd ? `"${upd.title}" now set for ${describeTrigger(upd.trigger)}` : "update failed",
+      };
+    },
+    render: (d) => JSON.stringify(d),
+  },
+  {
+    name: "scheduler.cancel",
+    desc: "cancel a scheduled task/reminder by reference. args: taskId OR matchTitle",
+    permission: "auto",
+    run: async (args) => {
+      const t = resolveTaskArg(args);
+      if (!t) return { ok: false, error: "no matching task found", unsupported: true };
+      cancelTask(t.id);
+      return { ok: true, verified: true, summary: `"${t.title}" cancelled` };
+    },
+    render: () => "cancelled",
+  },
+  {
+    name: "scheduler.complete",
+    desc: "mark a task as done by reference. args: taskId OR matchTitle",
+    permission: "auto",
+    run: async (args) => {
+      const t = resolveTaskArg(args);
+      if (!t) return { ok: false, error: "no matching task found", unsupported: true };
+      completeTask(t.id);
+      return { ok: true, verified: true, summary: `"${t.title}" marked done` };
+    },
+    render: () => "completed",
+  },
+  {
+    name: "scheduler.snooze",
+    desc: "snooze a reminder by reference. args: taskId OR matchTitle, minutes (default 10) OR until (epoch ms)",
+    permission: "auto",
+    run: async (args) => {
+      const t = resolveTaskArg(args);
+      if (!t) return { ok: false, error: "no matching task found", unsupported: true };
+      const minutes = isFinite(Number(args.minutes)) && Number(args.minutes) > 0 ? Number(args.minutes) : undefined;
+      const until = isFinite(Number(args.until)) ? Number(args.until) : undefined;
+      snoozeTask(t.id, { minutes, until });
+      const when = until ?? Date.now() + (minutes ?? 10) * 60000;
+      return { ok: true, verified: true, summary: `"${t.title}" snoozed to ${new Date(when).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` };
+    },
+    render: () => "snoozed",
+  },
+];
+
+/** Resolve a task from structured args: explicit id, else fuzzy title match
+    over active tasks (most recently created first). */
+function resolveTaskArg(args: Record<string, unknown>): ScheduledTask | undefined {
+  const id = String(args.taskId ?? "");
+  if (id) {
+    const t = getTask(id);
+    if (t) return t;
+  }
+  const q = String(args.matchTitle ?? "").toLowerCase().trim();
+  const active = listTasks({ status: ["scheduled", "snoozed"] }).reverse();
+  if (q) {
+    const hit = active.find((t) => t.title.toLowerCase().includes(q));
+    if (hit) return hit;
+  }
+  /* bare reference ("that"/"it"): most recent active task */
+  return active[0];
+}
+
+
 
 interface QuizState {
   question: string;
@@ -734,7 +914,7 @@ const QUIZ_ANSWER: ToolDef = {
   },
 };
 
-export const ALL_TOOLS: ToolDef[] = [...TOOLS, ...quizTools, QUIZ_ANSWER];
+export const ALL_TOOLS: ToolDef[] = [...TOOLS, ...quizTools, QUIZ_ANSWER, ...schedTools];
 
 export const toolByName = (name: string): ToolDef | undefined => ALL_TOOLS.find((t) => t.name === name);
 

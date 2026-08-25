@@ -6,6 +6,11 @@ const sttProxy = {
     target: "http://127.0.0.1:8765",
     changeOrigin: true,
     rewrite: (p: string) => p.replace(/^\/stt/, ""),
+    /* STT warms up for ~1-2 min after boot; ECONNREFUSED during that window
+       is normal — don't spam the vite console with proxy errors */
+    configure: (proxy: { on: (ev: string, cb: () => void) => void }) => {
+      proxy.on("error", () => {});
+    },
   },
   "/yt": {
     target: "https://www.youtube.com",

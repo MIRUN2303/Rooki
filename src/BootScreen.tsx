@@ -168,7 +168,9 @@ export default function BootScreen({ onComplete }: { onComplete: () => void }) {
           setStage(msg);
         }
         if (Date.now() - t0 > STT_TIMEOUT_MS) break;
-        await wait(STT_POLL_MS);
+        /* poll gently — model warmup takes 1-2 min; hammering the proxy
+           just spams ECONNREFUSED logs while it loads */
+        await wait(s.up ? STT_POLL_MS : 3000);
       }
       if (!alive) return;
       if (sttReady) {
