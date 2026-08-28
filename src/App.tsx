@@ -90,6 +90,7 @@ import DailyBriefing, {
   type SystemStatusItem,
 } from "./DailyBriefing";
 import { getCurrentLocation, getWeather } from "./weather";
+import MapPanel from "./MapPanel";
 
 const loc = (b: Bi, lang: Lang) => b[lang];
 
@@ -132,6 +133,7 @@ export default function App() {
   const [trace, setTrace] = useState<TurnTrace[]>([]);
   const [debugOpen, setDebugOpen] = useState(false);
   const [schedOpen, setSchedOpen] = useState(false);
+  const [mapOpen, setMapOpen] = useState(false);
   const [showBriefing, setShowBriefing] = useState(false);
   const [briefingData, setBriefingData] = useState<BriefingData | null>(null);
 
@@ -264,6 +266,13 @@ export default function App() {
     const onOpen = () => setSchedOpen(true);
     window.addEventListener("rooki-scheduler-open", onOpen);
     return () => window.removeEventListener("rooki-scheduler-open", onOpen);
+  }, []);
+
+  /* map panel open event */
+  useEffect(() => {
+    const onOpen = () => setMapOpen(true);
+    window.addEventListener("rooki-map-open", onOpen);
+    return () => window.removeEventListener("rooki-map-open", onOpen);
   }, []);
 
   /* session summary on leave — consumed once at next boot, never repeats */
@@ -1026,6 +1035,17 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
         </button>
         <button
           className="icon-btn"
+          onClick={() => setMapOpen((v) => !v)}
+          title="map"
+          aria-label="open map"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2zm0 1.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9z" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M8 5.5v3.5l2 1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+        <button
+          className="icon-btn"
           onClick={() => setSchedOpen((v) => !v)}
           title="scheduler"
           aria-label="open scheduler"
@@ -1116,6 +1136,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
           </div>
         </div>
         <SchedulerPanel open={schedOpen} onClose={() => setSchedOpen(false)} />
+        {mapOpen && <MapPanel onClose={() => setMapOpen(false)} />}
       </div>
 
       <div className="panel-stack left">
