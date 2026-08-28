@@ -11,7 +11,17 @@ import {
   type ProviderTestResult,
   type Settings,
 } from "./memory";
-import { enumerateAudioInputDevices, enumerateAudioOutputDevices, isOutputDeviceSupported, setInputDeviceId, setOutputDeviceId, getInputDeviceId } from "./voice";
+import {
+  enumerateAudioInputDevices,
+  enumerateAudioOutputDevices,
+  isOutputDeviceSupported,
+  setInputDeviceId,
+  setOutputDeviceId,
+  getInputDeviceId,
+  setTtsVoice,
+  setTtsSpeed,
+  getTtsStatus,
+} from "./voice";
 
 interface Props {
   open: boolean;
@@ -160,21 +170,69 @@ export default function SettingsModal({ open, settings, onChange, onClose, onCle
               <span>Test voice</span>
               <button
                 className="set-btn"
-                onClick={() => {
-                  const s = window.speechSynthesis;
-                  if (!("speechSynthesis" in window)) {
-                    alert("Your browser has no speech synthesis.");
-                    return;
+                onClick={async () => {
+                  try {
+                    const status = getTtsStatus();
+                    const res = await fetch("/tts/synthesize", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        text: "Hello, I am ROOKI. This is a voice test.",
+                        voice: status.voice,
+                        speed: status.speed,
+                      }),
+                    });
+                    if (!res.ok) {
+                      alert("TTS server not available. Is Kokoro running?");
+                      return;
+                    }
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const audio = new Audio(url);
+                    audio.play();
+                    audio.onended = () => URL.revokeObjectURL(url);
+                  } catch {
+                    alert("TTS server not available. Is Kokoro running?");
                   }
-                  s.cancel();
-                  s.resume();
-                  const u = new SpeechSynthesisUtterance("Hello, I am ROOKI. This is a voice test.");
-                  u.rate = 1.05;
-                  s.speak(u);
                 }}
               >
                 Speak a sample
               </button>
+            </div>
+            <div className="set-row">
+              <span>Voice</span>
+              <select
+                value={getTtsStatus().voice}
+                onChange={(e) => setTtsVoice(e.target.value)}
+                style={{ background: "rgba(255,255,255,0.05)", color: "var(--ink-strong)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: "8px", padding: "6px 10px", fontSize: "13px" }}
+              >
+                <option value="af_heart">AF Heart (female)</option>
+                <option value="af_bella">AF Bella (female)</option>
+                <option value="af_nicole">AF Nicole (female)</option>
+                <option value="af_sarah">AF Sarah (female)</option>
+                <option value="af_sky">AF Sky (female)</option>
+                <option value="am_adam">AM Adam (male)</option>
+                <option value="am_michael">AM Michael (male)</option>
+                <option value="bf_emma">BF Emma (female)</option>
+                <option value="bf_isabella">BF Isabella (female)</option>
+                <option value="bm_george">BM George (male)</option>
+                <option value="bm_lewis">BM Lewis (male)</option>
+              </select>
+            </div>
+            <div className="set-row">
+              <span>Speed</span>
+              <input
+                type="range"
+                min="0.5"
+                max="2.0"
+                step="0.1"
+                value={getTtsStatus().speed}
+                onChange={(e) => setTtsSpeed(parseFloat(e.target.value))}
+                style={{ flex: 1 }}
+              />
+              <span style={{ fontSize: "12px", color: "var(--ink-muted)", minWidth: "35px", textAlign: "right" }}>
+                {getTtsStatus().speed.toFixed(1)}x
+              </span>
             </div>
             <button className="set-btn danger" onClick={onClearMemory}>
               Clear memory

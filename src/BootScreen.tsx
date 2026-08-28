@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type CheckState = "pending" | "running" | "ok" | "error";
+type CheckState = "pending" | "running" | "ok" | "error" | "degraded";
 interface Check {
   id: string;
   label: string;
@@ -67,35 +67,29 @@ async function probeSTT(): Promise<{ up: boolean; stage: string }> {
 }
 
 function speakUntilStarted(text: string): () => void {
-  try {
-    if (!("speechSynthesis" in window)) return () => {};
-    const synth = window.speechSynthesis;
-    let started = false;
-    let tries = 0;
-    const attempt = () => {
-      if (started || tries++ > 12) return;
-      synth.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.02;
-      const v = synth.getVoices().find((vv) => vv.lang.startsWith("en"));
-      if (v) u.voice = v;
-      u.onstart = () => {
-        started = true;
-      };
-      synth.resume();
-      synth.speak(u);
-    };
-    attempt();
-    const iv = setInterval(attempt, 500);
-    synth.addEventListener("voiceschanged", attempt, { once: true });
-    return () => {
-      clearInterval(iv);
-      synth.removeEventListener("voiceschanged", attempt);
-      synth.cancel();
-    };
-  } catch {
-    return () => {};
-  }
+  let stopped = false;
+  let synth: SpeechSynthesis | null = null;
+
+  if (!("speechSynthesis" in window)) return () => {};
+
+  synth = window.speechSynthesis;
+  const voices = synth.getVoices();
+  const v = voices.find((vv) => vv.lang.startsWith("en"));
+  const u = new SpeechSynthesisUtterance(text);
+  if (v) u.voice = v;
+  u.rate = 1.0;
+
+  const cleanup = () => { stopped = true; synth?.cancel(); };
+
+  u.onstart = () => {};
+  u.onend = u.onerror = () => { if (!stopped) cleanup(); };
+  synth.resume();
+  synth.speak(u);
+
+  /* hard timeout - never let boot hang on voice */
+  setTimeout(() => { if (!stopped) cleanup(); }, 8000);
+
+  return cleanup;
 }
 
 export default function BootScreen({ onComplete }: { onComplete: () => void }) {
@@ -139,7 +133,7 @@ export default function BootScreen({ onComplete }: { onComplete: () => void }) {
 
       const g = greet.current;
       stopVoiceRef.current = speakUntilStarted(
-        `${g.text}. The time is ${timeString()}. Systems booting, please wait.`
+        "ROOKI systems initializing."
       );
 
       patch("stt", "running");
@@ -197,17 +191,10 @@ export default function BootScreen({ onComplete }: { onComplete: () => void }) {
 
       setStage("warming voice output");
       patch("tts", "running");
+      /* Web Speech API is always available in modern browsers */
       const hasTTS = "speechSynthesis" in window;
-      if (hasTTS && window.speechSynthesis.getVoices().length === 0) {
-        await new Promise<void>((res) => {
-          const done = () => res();
-          window.speechSynthesis.addEventListener("voiceschanged", done, { once: true });
-          setTimeout(done, 3000);
-        });
-      }
       if (!alive) return;
-      if (hasTTS) bank("tts");
-      else patch("tts", "error");
+      hasTTS ? bank("tts") : patch("tts", "degraded");
 
       setStage("all systems nominal");
     })();

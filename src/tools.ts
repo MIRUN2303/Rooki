@@ -20,6 +20,20 @@ import {
   truncate,
   type Settings,
 } from "./memory";
+import {
+  getWeather,
+  getCurrentWeather,
+  getForecast,
+  getWeatherSummary,
+  getWeatherForEvent,
+  willItRain,
+  LocationContext,
+  getCurrentLocation,
+  setLocation,
+  searchLocation,
+  geocodeAddress,
+  reverseGeocode,
+} from "./weather";
 import type { ResearchMode } from "./research";
 import type { ResearchResult } from "./engine";
 
@@ -285,38 +299,267 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "weather.get",
-    desc: "live weather for a place: args {location: 'Tirupur'} — temperature, conditions, feels like",
+    desc: "live weather for a place: args {location?: 'Chennai'} — temperature, conditions, feels like. If location omitted, uses current context location.",
     permission: "auto",
-    run: async (args) => {
+    run: async (args, deps) => {
       const loc = String(args.location ?? "").trim();
-      if (!loc) return { ok: false, error: "location required", unsupported: true };
-      try {
-        const r = await fetch(`/wttr/${encodeURIComponent(loc)}?format=j1`, { signal: AbortSignal.timeout(15000) });
-        if (!r.ok) return { ok: false, error: "weather service unavailable", unsupported: true };
-        const j = (await r.json()) as {
-          current_condition?: { temp_C: string; FeelsLikeC: string; weatherDesc: { value: string }[]; humidity: string; windspeedKmph: string }[];
+      let targetLocation: LocationContext | undefined;
+      if (loc) {
+        const geo = await geocodeAddress(loc);
+        if (!geo) return { ok: false, error: `Could not find location: ${loc}`, unsupported: true };
+        targetLocation = {
+          name: geo.name,
+          city: geo.city,
+          region: geo.region,
+          country: geo.country,
+          latitude: geo.latitude,
+          longitude: geo.longitude,
+          timezone: geo.timezone,
+          source: "explicit",
+          updatedAt: Date.now(),
         };
-        const c = j.current_condition?.[0];
-        if (!c) return { ok: false, error: "no weather for that location", unsupported: true };
+      }
+      try {
+        const weather = await getCurrentWeather(targetLocation);
+        if (!weather) return { ok: false, error: "Weather unavailable", unsupported: true };
         return {
           ok: true,
           data: {
-            location: loc,
-            temp_c: c.temp_C,
-            feels_like_c: c.FeelsLikeC,
-            desc: c.weatherDesc?.[0]?.value ?? "unknown",
-            humidity: c.humidity,
-            wind_kmh: c.windspeedKmph,
+            location: weather.location.city || weather.location.name,
+            temp_c: weather.current.temperature.toString(),
+            feels_like_c: weather.current.feelsLike.toString(),
+            desc: weather.current.condition,
+            humidity: weather.current.humidity.toString(),
+            wind_kmh: weather.current.windSpeed.toString(),
+            wind_dir: weather.current.windDirection,
+            pressure_hpa: weather.current.pressure.toString(),
+            visibility_km: weather.current.visibility.toString(),
+            uv_index: weather.current.uvIndex.toString(),
+            sunrise: weather.current.sunrise,
+            sunset: weather.current.sunset,
           },
         };
       } catch {
-        return { ok: false, error: "weather service unreachable", unsupported: true };
+        return { ok: false, error: "Weather service unreachable", unsupported: true };
       }
     },
     render: (d) => {
-      const r = d as { location: string; temp_c: string; feels_like_c: string; desc: string; humidity: string };
-      return `${r.location}: ${r.temp_c}°C, ${r.desc.toLowerCase()}, feels like ${r.feels_like_c}°C, humidity ${r.humidity}%`;
+      const r = d as { location: string; temp_c: string; feels_like_c: string; desc: string; humidity: string; wind_kmh: string; wind_dir: string; pressure_hpa: string; visibility_km: string; uv_index: string; sunrise: string; sunset: string };
+      return `${r.location}: ${r.temp_c}°C, ${r.desc.toLowerCase()}, feels like ${r.feels_like_c}°C, humidity ${r.humidity}%, wind ${r.wind_kmh} km/h ${r.wind_dir}, pressure ${r.pressure_hpa} hPa, visibility ${r.visibility_km} km, UV ${r.uv_index}, sunrise ${r.sunrise}, sunset ${r.sunset}`;
     },
+  },
+  {
+    name: "weather.forecast",
+    desc: "weather forecast for a place: args {location?: 'Chennai', days?: 3} — returns multi-day forecast",
+    permission: "auto",
+    run: async (args, deps) => {
+      const loc = String(args.location ?? "").trim();
+      const days = Math.min(Math.max(Number(args.days ?? 3), 1), 7);
+      let targetLocation: LocationContext | undefined;
+      if (loc) {
+        const geo = await geocodeAddress(loc);
+        if (!geo) return { ok: false, error: `Could not find location: ${loc}`, unsupported: true };
+        targetLocation = {
+          name: geo.name,
+          city: geo.city,
+          region: geo.region,
+          country: geo.country,
+          latitude: geo.latitude,
+          longitude: geo.longitude,
+          timezone: geo.timezone,
+          source: "explicit",
+          updatedAt: Date.now(),
+        };
+      }
+      try {
+        const forecast = await getForecast(targetLocation, days);
+        if (!forecast || !forecast.length) return { ok: false, error: "Forecast unavailable", unsupported: true };
+        return {
+          ok: true,
+          data: forecast.map((f) => ({
+            date: f.date,
+            day: f.dayName,
+            high_c: f.high,
+            low_c: f.low,
+            condition: f.condition,
+            rain_chance: f.rainChance,
+            rain_mm: f.rainAmount,
+            uv_index: f.uvIndex,
+            sunrise: f.sunrise,
+            sunset: f.sunset,
+          })),
+        };
+      } catch {
+        return { ok: false, error: "Forecast service unreachable", unsupported: true };
+      }
+    },
+    render: (d) => {
+      const arr = d as Array<{ date: string; day: string; high_c: number; low_c: number; condition: string; rain_chance: number }>;
+      return arr.map((f) => `${f.day} (${f.date}): ${f.high_c}°/${f.low_c}°C, ${f.condition}, ${f.rain_chance}% rain`).join("\n");
+    },
+  },
+  {
+    name: "weather.rain",
+    desc: "check if it will rain: args {location?: 'Chennai', hours?: 12} — returns rain probability",
+    permission: "auto",
+    run: async (args, deps) => {
+      const loc = String(args.location ?? "").trim();
+      const hours = Math.min(Math.max(Number(args.hours ?? 12), 1), 48);
+      let targetLocation: LocationContext | undefined;
+      if (loc) {
+        const geo = await geocodeAddress(loc);
+        if (!geo) return { ok: false, error: `Could not find location: ${loc}`, unsupported: true };
+        targetLocation = {
+          name: geo.name,
+          city: geo.city,
+          region: geo.region,
+          country: geo.country,
+          latitude: geo.latitude,
+          longitude: geo.longitude,
+          timezone: geo.timezone,
+          source: "explicit",
+          updatedAt: Date.now(),
+        };
+      }
+      try {
+        const rain = await willItRain(targetLocation, hours);
+        return {
+          ok: true,
+          data: rain,
+          summary: rain.willRain ? `Yes, ${rain.chance}% chance of rain ${rain.when ? `(${rain.when})` : ""}` : `No rain expected (${rain.chance}% chance)`,
+        };
+      } catch {
+        return { ok: false, error: "Rain check unavailable", unsupported: true };
+      }
+    },
+    render: (d) => {
+      const r = d as { willRain: boolean; chance: number; when?: string };
+      return r.willRain ? `Rain likely: ${r.chance}% chance ${r.when ? `(${r.when})` : ""}` : `No rain expected (${r.chance}% chance)`;
+    },
+  },
+  {
+    name: "weather.summary",
+    desc: "brief weather summary for a place: args {location?: 'Chennai'} — one-line overview",
+    permission: "auto",
+    run: async (args) => {
+      const loc = String(args.location ?? "").trim();
+      let targetLocation: LocationContext | undefined;
+      if (loc) {
+        const geo = await geocodeAddress(loc);
+        if (!geo) return { ok: false, error: `Could not find location: ${loc}`, unsupported: true };
+        targetLocation = {
+          name: geo.name,
+          city: geo.city,
+          region: geo.region,
+          country: geo.country,
+          latitude: geo.latitude,
+          longitude: geo.longitude,
+          timezone: geo.timezone,
+          source: "explicit",
+          updatedAt: Date.now(),
+        };
+      }
+      try {
+        const summary = await getWeatherSummary(targetLocation);
+        return { ok: true, data: { summary }, summary: summary ?? "Weather unavailable" };
+      } catch {
+        return { ok: false, error: "Summary unavailable", unsupported: true };
+      }
+    },
+    render: (d) => {
+      const r = d as { summary: string };
+      return r.summary;
+    },
+  },
+  {
+    name: "weather.event",
+    desc: "weather for a calendar event: args {eventLocation: 'Marina Beach, Chennai'} — returns weather for event location",
+    permission: "auto",
+    run: async (args) => {
+      const eventLocation = String(args.eventLocation ?? "").trim();
+      if (!eventLocation) return { ok: false, error: "eventLocation required", unsupported: true };
+      try {
+        const weather = await getWeatherForEvent(eventLocation);
+        if (!weather) return { ok: false, error: "Could not get weather for event location", unsupported: true };
+        return {
+          ok: true,
+          data: {
+            location: weather.location.city || weather.location.name,
+            current: {
+              temp_c: weather.current.temperature,
+              condition: weather.current.condition,
+              rain_chance: weather.forecast[0]?.rainChance || 0,
+            },
+            forecast: weather.forecast.slice(0, 3).map((f) => ({
+              date: f.date,
+              high_c: f.high,
+              low_c: f.low,
+              rain_chance: f.rainChance,
+            })),
+          },
+        };
+      } catch {
+        return { ok: false, error: "Event weather unavailable", unsupported: true };
+      }
+    },
+    render: (d) => JSON.stringify(d),
+  },
+
+  {
+    name: "location.set",
+    desc: "set default location: args {city: 'Chennai', region: 'Tamil Nadu', country: 'India', latitude: 13.0827, longitude: 80.2707, timezone: 'Asia/Kolkata'} — saves as default location",
+    permission: "auto",
+    run: async (args) => {
+      const city = String(args.city ?? "").trim();
+      const region = String(args.region ?? "").trim();
+      const country = String(args.country ?? "").trim();
+      const latitude = Number(args.latitude);
+      const longitude = Number(args.longitude);
+      const timezone = String(args.timezone ?? "").trim() || Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (!city || !Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        return { ok: false, error: "city, latitude, longitude required", unsupported: true };
+      }
+      const { formatLocation, setLocation } = await import("./weather");
+      const loc = await setLocation({ name: city, city, region, country, latitude, longitude, timezone, source: "saved" });
+      return { ok: true, data: { location: formatLocation(loc) }, summary: `Default location set to ${formatLocation(loc)}` };
+    },
+    render: (d) => JSON.stringify(d),
+  },
+  {
+    name: "location.get",
+    desc: "get current/default location: args {} — returns saved location or detects current",
+    permission: "auto",
+    run: async () => {
+      const { getCurrentLocation, formatLocation } = await import("./weather");
+      const loc = await getCurrentLocation();
+      if (!loc) return { ok: false, error: "No location available", unsupported: true };
+      return { ok: true, data: { location: formatLocation(loc), city: loc.city, region: loc.region, country: loc.country, latitude: loc.latitude, longitude: loc.longitude, timezone: loc.timezone, source: loc.source } };
+    },
+    render: (d) => JSON.stringify(d),
+  },
+  {
+    name: "location.search",
+    desc: "search for a location: args {query: 'Chennai'} — returns geocoding results",
+    permission: "auto",
+    run: async (args) => {
+      const query = String(args.query ?? "").trim();
+      if (!query) return { ok: false, error: "query required", unsupported: true };
+      const { searchLocation } = await import("./weather");
+      const results = await searchLocation(query);
+      return { ok: true, data: results.map((r) => ({ name: r.name, city: r.city, region: r.region, country: r.country, latitude: r.latitude, longitude: r.longitude, timezone: r.timezone })) };
+    },
+    render: (d) => JSON.stringify(d),
+  },
+  {
+    name: "location.clear",
+    desc: "clear saved location: args {}",
+    permission: "auto",
+    run: async () => {
+      const { clearSavedLocation } = await import("./weather");
+      clearSavedLocation();
+      return { ok: true, summary: "Saved location cleared" };
+    },
+    render: () => "Location cleared",
   },
   {
     name: "calculator.calc",

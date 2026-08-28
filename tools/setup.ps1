@@ -14,8 +14,13 @@ Write-Host "Installing pip packages (torch + NeMo, ~1.5GB download, first run ta
 & $py -m pip install "nemo_toolkit[asr]" fastapi uvicorn
 
 Write-Host ""
+Write-Host "Installing Kokoro TTS ..."
+& $py -m pip install kokoro soundfile
+
+Write-Host ""
 Write-Host "Downloading Parakeet model (~2.4GB) into tools\models ..."
 & $py -c "import os; os.environ['NEMO_CACHE_DIR']=os.path.join(os.getcwd(),'tools','models'); import nemo.collections.asr as n; n.models.ASRModel.from_pretrained('nvidia/parakeet-tdt-0.6b-v2')"
 
 Write-Host ""
 Write-Host "Done. Start the server with:  tools\venv\Scripts\python.exe stt_server.py"
+Write-Host "Kokoro TTS will download its model on first run."

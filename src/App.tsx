@@ -52,8 +52,16 @@ import {
   rememberContent,
   lastResearchResult,
   anyProviderConfigured,
+  updateWorkingMemory,
+  findOrCreateThread,
+  buildCrossDayContext,
+  formatCrossDayContext,
+  applyMemoryDecay,
+  memoryManagerDebug,
   type LlmError,
   type Settings,
+  type WorkingMemory,
+  type SessionThread,
 } from "./memory";
 import { researchTopic, webImageSearch, type ImageRef, type ResearchMode } from "./research";
 import {
@@ -71,7 +79,17 @@ import { callAgent } from "./agent";
 import { youtubeMusicSearch, youtubeVideoSearch, type MediaItem } from "./tools";
 import BootScreen from "./BootScreen";
 import SchedulerPanel, { SchedulerToasts } from "./SchedulerPanel";
-import { startScheduler } from "./scheduler";
+import { startScheduler, listTasks } from "./scheduler";
+import DailyBriefing, {
+  getTimeGreeting,
+  isFirstLoginToday,
+  markBriefingShown,
+  type BriefingData,
+  type WeatherData,
+  type ScheduleSummary,
+  type SystemStatusItem,
+} from "./DailyBriefing";
+import { getCurrentLocation, getWeather } from "./weather";
 
 const loc = (b: Bi, lang: Lang) => b[lang];
 
@@ -114,6 +132,8 @@ export default function App() {
   const [trace, setTrace] = useState<TurnTrace[]>([]);
   const [debugOpen, setDebugOpen] = useState(false);
   const [schedOpen, setSchedOpen] = useState(false);
+  const [showBriefing, setShowBriefing] = useState(false);
+  const [briefingData, setBriefingData] = useState<BriefingData | null>(null);
 
   const langRef = useRef<Lang>("en");
   const phaseRef = useRef<VoiceState>("idle");
@@ -151,12 +171,92 @@ export default function App() {
     timersRef.current = [];
   };
 
+  /* ---- daily briefing helpers ---- */
+  async function fetchWeatherForBriefing(): Promise<WeatherData | null> {
+    try {
+      const location = await getCurrentLocation();
+      const weather = await getWeather(location || undefined);
+      if (!weather) return null;
+      return {
+        temp: Math.round(weather.current.temperature),
+        condition: weather.current.condition,
+        rain: weather.forecast[0]?.rainChance || 0,
+        location: weather.location.city || weather.location.name,
+        high: Math.round(weather.forecast[0]?.high || weather.current.temperature),
+        low: Math.round(weather.forecast[0]?.low || weather.current.temperature),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function fetchScheduleSummary(): ScheduleSummary | null {
+    try {
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const end = start + 86400000;
+      const tasks = listTasks({ status: ["scheduled"], from: start, to: end });
+      if (!tasks.length) return null;
+      return {
+        total: tasks.length,
+        important: tasks.slice(0, 3).map((t) => ({
+          title: t.title,
+          time: t.nextRunAt
+            ? new Date(t.nextRunAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+            : "",
+        })),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function fetchSystemStatus(): SystemStatusItem[] {
+    const items: SystemStatusItem[] = [];
+    items.push({ name: "Core", status: "live" });
+    items.push({ name: "AI", status: anyProviderConfigured(settings) ? "live" : "offline" });
+    items.push({ name: "STT", status: sttErr ? "offline" : "live" });
+    return items;
+  }
+
   useEffect(() => () => { clearTimers(); stopMic(); }, []);
 
   /* scheduler engine — restart recovery + due-task firing */
   useEffect(() => {
     if (!booted) return;
     startScheduler();
+  }, [booted]);
+
+  /* daily briefing — first login of day only */
+  useEffect(() => {
+    if (!booted) return;
+    if (!isFirstLoginToday()) return;
+
+    const loadBriefing = async () => {
+      const greeting = getTimeGreeting();
+      const weather = await fetchWeatherForBriefing();
+      const schedule = fetchScheduleSummary();
+      const systemStatus = fetchSystemStatus();
+
+      setBriefingData({
+        greeting: greeting.text,
+        period: greeting.period,
+        weather,
+        schedule,
+        systemStatus,
+        horoscope: null,
+      });
+      setShowBriefing(true);
+      markBriefingShown();
+    };
+
+    loadBriefing();
+  }, [booted]);
+
+  /* memory maintenance — decay old memories on boot */
+  useEffect(() => {
+    if (!booted) return;
+    applyMemoryDecay();
   }, [booted]);
 
   /* tools open the panel contextually (scheduler.create / list) */
@@ -803,6 +903,19 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
       sessionNotesRef.current = [...sessionNotesRef.current.slice(-5), note.slice(0, 80)];
     }
 
+    /* ---- working memory + thread tracking ---- */
+    const entities = decision.entities ?? [];
+    const topic = decision.goal || decision.interpreted_input || raw.slice(0, 40);
+    if (topic) {
+      findOrCreateThread(topic, entities);
+      updateWorkingMemory({
+        activeTopic: topic,
+        activeEntities: entities.slice(0, 5),
+        activeTask: decision.mode || null,
+        currentGoal: decision.goal || null,
+      });
+    }
+
     const tr: TurnTrace = {
       input: raw,
       asr: asrRef.current,
@@ -885,6 +998,14 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
       <Background />
       <div className="vignette" />
       <div className="grain" />
+
+      {/* daily briefing overlay — first login of day */}
+      {showBriefing && briefingData && (
+        <DailyBriefing
+          data={briefingData}
+          onDismiss={() => setShowBriefing(false)}
+        />
+      )}
 
       <header className="topbar">
         <div className="brand">

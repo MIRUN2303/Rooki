@@ -514,13 +514,13 @@ export function compactMemory(ctx: MemoryContext, limit = 3): string {
 const SESSIONS_KEY = "rooki.sessions.v1";
 const SESSION_MAX = 3;
 
-interface SessionEntry {
+export interface SessionEntry {
   date: string;
   summary: string;
   language?: string;
 }
 
-function loadSessions(): SessionEntry[] {
+export function loadSessions(): SessionEntry[] {
   try {
     const raw = localStorage.getItem(SESSIONS_KEY);
     const list = raw ? (JSON.parse(raw) as SessionEntry[]) : [];
@@ -1014,3 +1014,33 @@ export async function consolidateMemory(settings: Settings, candidateText: strin
   if (!res || !res.action) return { action: "store", reason: "parse failed" };
   return { action: res.action, targetId: res.targetId, reason: res.reason || "" };
 }
+
+/* ════════════════════════════════════════
+   MEMORY MANAGER — additive enhancement layer
+   Re-exported here for backward compatibility.
+   ════════════════════════════════════════ */
+
+export {
+  loadWorkingMemory,
+  saveWorkingMemory,
+  updateWorkingMemory,
+  clearWorkingMemory,
+  findOrCreateThread,
+  updateThreadSummary,
+  getRecentThreads,
+  retrieveScoredMemories,
+  buildCrossDayContext,
+  formatCrossDayContext,
+  applyMemoryDecay,
+  promoteMemory,
+  demoteMemory,
+  consolidateDuplicates,
+  memoryManagerDebug,
+  scoreMemoryRelevance,
+  calculateDecay,
+  type WorkingMemory,
+  type SessionThread,
+  type ScoredMemory,
+  type CrossDayContext,
+  type MemoryDecayConfig,
+} from "./memoryManager";
