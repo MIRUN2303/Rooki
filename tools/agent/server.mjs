@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import * as memory from "./memory.mjs";
 
 /* ROOKI local agent bridge.
    HTTP shim on 127.0.0.1:8766 -> whitelisted PowerShell capabilities.
@@ -135,6 +136,39 @@ createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify(result));
   }
+  /* ── Memory endpoints ─────────────────────────────────────────────────── */
+  if (req.method === "GET" && url.pathname === "/memory/get") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: true, memory: memory.formatForPrompt() }));
+  }
+  if (req.method === "POST" && url.pathname === "/memory/update") {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    let delta;
+    try { delta = JSON.parse(body); } catch { delta = null; }
+    const result = memory.update(delta);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: true, updated: true }));
+  }
+  if (req.method === "POST" && url.pathname === "/memory/session") {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    let summary, language;
+    try { ({ summary, language } = JSON.parse(body)); } catch { summary = ""; }
+    memory.saveSessionSummary(summary, language);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: true }));
+  }
+  if (req.method === "POST" && url.pathname === "/memory/forget") {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    let key, category;
+    try { ({ key, category } = JSON.parse(body)); } catch { key = ""; }
+    const removed = memory.forget(key, category);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: true, removed }));
+  }
+
   if (req.method !== "POST" || url.pathname !== "/call") {
     res.writeHead(404, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ ok: false, error: "not found" }));

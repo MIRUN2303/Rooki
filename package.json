@@ -11,6 +11,7 @@
     "dev:desktop": "ROOKI_DEV=1 concurrently -k -n VITE,STT,AGENT,ELECTRON -c green,cyan,yellow,magenta \"vite\" \"C:\\Users\\mirun\\AppData\\Local\\Programs\\Python\\Python313\\python.exe stt_server.py\" \"node tools/agent/server.mjs\" \"electron .\"",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "selfcheck": "vite build --config vite.selfcheck.ts && node dist-selfcheck/selfcheck.js",
     "agent": "node tools/agent/server.mjs",
     "desktop": "electron .",
     "desktop:build": "electron-builder"

@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-selfcheck/
 vite.dev.log
 vite.err.log
 *.pid
@@ -16,4 +17,6 @@ stt_server.py
 __pycache__/
 stt_out.log
 stt_err.log
+el.log
+el-out.log
 tools/last_utterance.webm

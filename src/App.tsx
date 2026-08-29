@@ -13,6 +13,7 @@ import {
   resetRecord,
   speak,
   stopSpeaking,
+  isSpeaking,
   STATE_COLORS,
   type VoiceState,
   getInputDeviceId,
@@ -30,6 +31,7 @@ import {
   openReply,
   rememberPayload,
   openPayload,
+  mapPayload,
   bi,
   type Bi,
   type ChartData,
@@ -58,6 +60,7 @@ import {
   formatCrossDayContext,
   applyMemoryDecay,
   memoryManagerDebug,
+  captureFeedback,
   type LlmError,
   type Settings,
   type WorkingMemory,
@@ -365,6 +368,39 @@ export default function App() {
        stream here; leaked duplicate captures degraded recognition */
   };
 
+  /* barge-in: the ONE thing that can cut ROOKI off mid-answer. Normal
+     transcription is suspended while speaking (no echo loop); this monitor
+     listens only for the interrupt phrase. */
+  const INTERRUPT_RE =
+    /(^|[^a-z])stop([^a-z]|$)|stop talking|stop speaking|shut up|quiet|enough|pause|hold on|never ?mind|rooki ?stop|停|停下|停一下|别说了|别讲了|住口|闭嘴|安静|暂停/i;
+
+  const bargeIn = () => {
+    stopSpeaking();
+    sttPendingRef.current = false;
+    resetRecord();
+    setPhaseBoth("listening");
+    startRecord();
+  };
+
+  const checkInterrupt = async () => {
+    if (transcribingRef.current) return;
+    transcribingRef.current = true;
+    try {
+      const blob = await stopRecord();
+      resetRecord();
+      startRecord();
+      if (!blob || blob.size <= 4096) return; /* noise only — keep listening */
+      const text = await transcribe(blob);
+      if (text && INTERRUPT_RE.test(text)) bargeIn();
+      /* anything else the mic picked up while ROOKI spoke is DISCARED —
+         it never becomes a turn, so no echo loop */
+    } catch {
+      /* STT hiccup — ignore, keep monitoring */
+    } finally {
+      transcribingRef.current = false;
+    }
+  };
+
   const micFailMsg = (r: MicResult) => {
     const zh = langRef.current === "zh";
     if (r.reason === "denied")
@@ -437,6 +473,58 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
       }
     }, 120);
     return () => clearInterval(iv);
+  }, [phase]);
+
+  /* interrupt monitor: active only while ROOKI is mid-answer. Picks up a
+     mic burst followed by ~700ms silence, or a sustained ~1.5s burst
+     (interrupt spoken OVER the voice), and runs it through the interrupt
+     keyword check. Non-matching audio is dropped silently. */
+  useEffect(() => {
+    if (phase !== "speaking") return;
+    let burstActive = false;
+    let burstT0 = 0;
+    let gapSince = 0;
+    let durFired = false;
+    let pending: number | null = null;
+    const finalize = () => {
+      if (pending || transcribingRef.current) return;
+      pending = window.setTimeout(() => {
+        pending = null;
+        if (phaseRef.current !== "speaking" || !isSpeaking()) return;
+        checkInterrupt();
+      }, 250);
+    };
+    const iv = window.setInterval(() => {
+      if (!isSpeaking() || !micOnRef.current) {
+        /* answer done (or mic off) — normal timers handle the transition */
+        burstActive = false;
+        gapSince = 0;
+        return;
+      }
+      if (audio.level > 0.085) {
+        gapSince = 0;
+        if (!burstActive) {
+          burstActive = true;
+          burstT0 = Date.now();
+        }
+        if (!durFired && Date.now() - burstT0 >= 1500) {
+          durFired = true; /* one duration check per answer */
+          finalize();
+        }
+      } else {
+        if (burstActive) gapSince += 120;
+        if (burstActive && gapSince >= 700) {
+          burstActive = false;
+          finalize();
+        } else if (gapSince >= 700) {
+          gapSince = 0;
+        }
+      }
+    }, 120);
+    return () => {
+      window.clearInterval(iv);
+      if (pending) window.clearTimeout(pending);
+    };
   }, [phase]);
 
   /* watchdog: if nothing is in flight and the phase is stuck in a waiting
@@ -757,6 +845,39 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     answer(recallReply(items, lang));
   };
 
+  const doMap = async (raw: string, lang: Lang) => {
+    const q = mapPayload(raw) || raw;
+    setMapOpen(true);
+    const { searchLocation } = await import("./location");
+    const res = await searchLocation(q).catch(() => []);
+    if (!res.length) {
+      answer(lang === "zh" ? `找不到「${q}」这个地方。` : `I couldn't find "${q}" on the map.`);
+      return;
+    }
+    let org: { latitude: number; longitude: number } | null = null;
+    try {
+      const pos = await (await import("./location")).getDeviceLocation();
+      org = { latitude: pos.latitude, longitude: pos.longitude };
+    } catch {}
+    window.dispatchEvent(
+      new CustomEvent("rooki-map-locate", {
+        detail: {
+          query: q,
+          results: res.slice(0, 5).map((r) => ({
+            name: r.name, city: r.city, region: r.region, country: r.country,
+            latitude: r.latitude, longitude: r.longitude,
+          })),
+          origin: org,
+        },
+      })
+    );
+    answer(
+      lang === "zh"
+        ? `在地图上标出了「${res[0].name.split(",")[0]}」。`
+        : `Marked ${res[0].name.split(",")[0]} on the map.`
+    );
+  };
+
   const fallbackSend = (raw: string, lang: Lang) => {
     const intent = detectIntent(raw);
     if (intent === "chat") {
@@ -805,6 +926,9 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
         break;
       case "whoami":
         answer(whoAmIReply(names, lang));
+        break;
+      case "map":
+        doMap(raw, lang);
         break;
       default:
         doChat(raw, lang);
@@ -973,6 +1097,8 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     const lang: Lang = /[\u4e00-\u9fa5]/.test(raw) ? "zh" : "en";
     langRef.current = lang;
     void rememberLanguage(lang); /* silent identity — deduped by key */
+    /* explicit like/dislike statements become durable preferences */
+    captureFeedback(raw);
     pushMsg({ role: "user", text: raw });
     /* a new turn must not inherit the previous turn's research panel */
     setResult(null);

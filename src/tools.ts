@@ -17,6 +17,7 @@ import {
   llmJson,
   memoryRecall,
   storeSmartMemory,
+  upsertMemory,
   truncate,
   type Settings,
 } from "./memory";
@@ -36,6 +37,15 @@ import {
 } from "./weather";
 import type { ResearchMode } from "./research";
 import type { ResearchResult } from "./engine";
+import {
+  type InteractionType,
+  INTERACTION_TYPES,
+  getActiveInteraction,
+  startInteraction,
+  updateInteraction,
+  stopInteraction,
+  interactionStep,
+} from "./interaction";
 
 export interface ToolDeps {
   lang: "en" | "zh";
@@ -539,7 +549,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "location.search",
-    desc: "search for a location: args {query: 'Chennai'} — returns geocoding results",
+    desc: "locate/search for a place or address: args {query: 'Chennai'} — use for 'where is X', 'locate X', 'find X', returns geocoding results with coordinates",
     permission: "auto",
     run: async (args) => {
       const query = String(args.query ?? "").trim();
@@ -560,6 +570,46 @@ const TOOLS: ToolDef[] = [
       return { ok: true, summary: "Saved location cleared" };
     },
     render: () => "Location cleared",
+  },
+  {
+    name: "map.locate",
+    desc: "locate/show a place on the map: args {query: 'Eiffel Tower'} — use for 'where is X', 'locate X', 'show X on the map', 'directions to X', or any discussion about a place. Opens the map panel with markers, images and info.",
+    permission: "auto",
+    run: async (args) => {
+      const query = String(args.query ?? "").trim();
+      if (!query) return { ok: false, error: "query required", unsupported: true };
+      const { searchLocation, getDeviceLocation } = await import("./location");
+      const res = await searchLocation(query);
+      if (!res.length) return { ok: false, error: `couldn't find a place for "${query}"`, unsupported: true };
+      let origin: { latitude: number; longitude: number } | null = null;
+      try {
+        const pos = await getDeviceLocation();
+        origin = { latitude: pos.latitude, longitude: pos.longitude };
+      } catch {}
+      const places = res.slice(0, 5).map((r) => ({
+        name: r.name, city: r.city, region: r.region, country: r.country,
+        latitude: r.latitude, longitude: r.longitude,
+      }));
+      window.dispatchEvent(new CustomEvent("rooki-map-locate", { detail: { query, results: places, origin } }));
+      window.dispatchEvent(new CustomEvent("rooki-map-open"));
+      upsertMemory("fact", `Asked about place: ${places[0].name}`, {
+        memoryType: "permanent",
+        category: "location",
+        key: `place_${query.toLowerCase().replace(/\s+/g, "_").slice(0, 40)}`,
+        source: "inferred",
+        confidence: "0.8",
+      });
+      if (places.length === 1) {
+        return { ok: true, verified: true, data: { query, places }, summary: `located ${places[0].name} on the map (${places[0].latitude.toFixed(3)}, ${places[0].longitude.toFixed(3)})` };
+      }
+      return {
+        ok: true,
+        verified: true,
+        data: { query, places },
+        summary: `found ${places.length} possible matches for "${query}": ${places.map((p) => p.name).join(" | ")}. Showed all on the map — briefly ask which one they mean ("did you mean A or B?").`,
+      };
+    },
+    render: (d) => JSON.stringify(d),
   },
   {
     name: "calculator.calc",
@@ -1157,7 +1207,67 @@ const QUIZ_ANSWER: ToolDef = {
   },
 };
 
-export const ALL_TOOLS: ToolDef[] = [...TOOLS, ...quizTools, QUIZ_ANSWER, ...schedTools];
+/* ---------------- dynamic interaction (multi-turn activities) ----------------
+   One shared capability; the model picks the TYPE and runs it turn by turn. */
+
+const friendlyType = (t: string): string =>
+  ({ guessing_game: "guessing game", riddle: "riddle", word_game: "word game", trivia: "trivia", story_game: "story", twenty_questions: "20 questions" })[t] ?? t;
+
+export const INTERACTION_TOOL: ToolDef = {
+  name: "interaction.manage",
+  desc: "drive an interactive activity across turns (start a new one, continue it, switch type, or end it). types: guessing_game (you pick a secret, user asks yes/no), twenty_questions (user picks the secret, you ask yes/no), riddle, trivia, word_game, story_game. start with {action:start,type,theme?,objective?}; afterwards pass the user's reply with {action:step,reply}; {action:switch,type} changes a running activity; {action:end} stops it.",
+  permission: "auto",
+  run: async (args, deps) => {
+    const action = String(args.action ?? "step").trim().toLowerCase();
+    if (action === "end") {
+      const it = stopInteraction();
+      if (!it) return { ok: false, error: "no active activity", unsupported: true };
+      return { ok: true, data: { activity: friendlyType(it.type), ended: true, rounds: it.round, score: it.score } };
+    }
+    if (action === "switch") {
+      const it = getActiveInteraction();
+      if (!it) return { ok: false, error: "no active activity", unsupported: true };
+      const type = String(args.type ?? "").trim() as InteractionType;
+      if (!INTERACTION_TYPES.includes(type)) return { ok: false, error: `unknown type "${type}"`, unsupported: true };
+      updateInteraction({ type, objective: String(args.objective ?? it.objective), state: {} });
+      const step = await interactionStep(deps.settings, deps.lang, "");
+      return { ok: true, data: { activity: friendlyType(type), switched: true, reply: step?.reply } };
+    }
+    if (action === "start") {
+      const type = String(args.type ?? "").trim() as InteractionType;
+      if (!INTERACTION_TYPES.includes(type)) return { ok: false, error: `unknown type "${type}"`, unsupported: true };
+      const theme = String(args.theme ?? "").trim();
+      const objective = String(args.objective ?? "").trim();
+      startInteraction(type, theme, objective);
+      const step = await interactionStep(deps.settings, deps.lang, "");
+      if (!step) {
+        stopInteraction();
+        return { ok: false, error: "opening move failed", unsupported: true };
+      }
+      return { ok: true, data: { activity: friendlyType(type), round: 1, reply: step.reply, started: true } };
+    }
+    const cur = getActiveInteraction();
+    if (!cur) return { ok: false, error: "no active activity — use action:start first", unsupported: true };
+    const reply = String(args.reply ?? deps.userText ?? "").trim();
+    const step = await interactionStep(deps.settings, deps.lang, reply);
+    if (!step) return { ok: false, error: "next move failed", unsupported: true };
+    return {
+      ok: true,
+      data: { activity: friendlyType(cur.type), round: cur.round, score: cur.score, reply: step.reply, ended: step.ended },
+    };
+  },
+  render: (d) => {
+    const r = d as Record<string, unknown>;
+    const bits: string[] = [];
+    if (typeof r.activity === "string" && r.activity) bits.push(String(r.activity));
+    if (r.switched) bits.push("switched");
+    if (r.ended) bits.push("ended");
+    if (typeof r.reply === "string" && r.reply) bits.push(s80(String(r.reply)));
+    return bits.join(" — ") || "ok";
+  },
+};
+
+export const ALL_TOOLS: ToolDef[] = [...TOOLS, ...quizTools, QUIZ_ANSWER, INTERACTION_TOOL, ...schedTools];
 
 export const toolByName = (name: string): ToolDef | undefined => ALL_TOOLS.find((t) => t.name === name);
 

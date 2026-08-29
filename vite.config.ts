@@ -51,6 +51,11 @@ const sttProxy = {
     changeOrigin: true,
     rewrite: (p: string) => p.replace(/^\/wttr/, ""),
   },
+  "/nominatim": {
+    target: "https://nominatim.openstreetmap.org",
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(/^\/nominatim/, ""),
+  },
 };
 
 export default defineConfig({

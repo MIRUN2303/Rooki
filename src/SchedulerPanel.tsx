@@ -346,9 +346,13 @@ export default function SchedulerPanel({
                   >
                     <span className="scheduler-cell-num">{d.getDate()}</span>
                     {dots?.size ? (
-                      <span className="scheduler-cell-dots">
-                        {[...dots].slice(0, 3).map((c) => <i key={c} className={c} />)}
-                      </span>
+                      dots.size > 1 ? (
+                        <span className={`scheduler-cell-pin multi ${[...dots][0]}`} title={`${dots.size} scheduled`}>
+                          {dots.size}
+                        </span>
+                      ) : (
+                        <i className={`scheduler-cell-pin ${[...dots][0]}`} title="scheduled" />
+                      )
                     ) : null}
                   </button>
                 );

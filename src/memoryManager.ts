@@ -8,6 +8,8 @@ import {
   addMemory,
   loadSessions,
   popLastSession,
+  upsertMemory,
+  forgetMemory,
   type MemoryItem,
   type MemoryKind,
   type SessionSummary,
@@ -460,6 +462,167 @@ export function consolidateDuplicates(): number {
   }
 
   return toRemove.length;
+}
+
+/* ════════════════════════════════════════
+   EXPERIENCE MEMORY — what activity happened recently
+   ════════════════════════════════════════ */
+
+export interface Experience {
+  activity: string; // "guessing game", "quiz", "web.search", ...
+  outcome: "satisfied" | "neutral" | "frustrated";
+  ts: number;
+  detail?: string;
+}
+
+const EXPERIENCE_KEY = "rooki.experience.v1";
+const EXPERIENCE_CAP = 40;
+
+export function loadExperiences(): Experience[] {
+  try {
+    const raw = localStorage.getItem(EXPERIENCE_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw) as Experience[];
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveExperiences(list: Experience[]): void {
+  try {
+    localStorage.setItem(EXPERIENCE_KEY, JSON.stringify(list.slice(-EXPERIENCE_CAP)));
+  } catch {
+    /* storage full — we can live without the log */
+  }
+}
+
+export function recordExperience(activity: string, outcome: Experience["outcome"], detail?: string): void {
+  const list = loadExperiences();
+  const now = Date.now();
+  const last = list[list.length - 1];
+  /* consecutive repeats of the same activity merge into one entry */
+  if (last && last.activity === activity && last.outcome === outcome && now - last.ts < 3 * 3600e3) {
+    last.ts = now;
+    last.detail = detail ?? last.detail;
+    saveExperiences(list);
+    return;
+  }
+  list.push({ activity, outcome, ts: now, detail });
+  saveExperiences(list);
+}
+
+export function recentExperiences(limit = 8): Experience[] {
+  return loadExperiences().slice(-limit);
+}
+
+/* variety hint for the decision context — surfaces repeated uses so the model
+   can actively avoid a rut. A HINT, never a hard rule. */
+export function noveltyHint(limit = 6): string {
+  const recent = loadExperiences().slice(-limit);
+  if (!recent.length) return "";
+  const counts = new Map<string, number>();
+  for (const e of recent) counts.set(e.activity, (counts.get(e.activity) ?? 0) + 1);
+  const repeated = [...counts.entries()].filter(([, n]) => n >= 2).map(([a]) => a);
+  const last = recent[recent.length - 1];
+  const seq = recent.map((e) => e.activity).join(" → ");
+  const note = repeated.length
+    ? `; ${repeated.join(", ")} used repeatedly recently — if the user asks for something open-ended again, pick a different choice`
+    : "";
+  return `latest: ${last.activity}; sequence: ${seq}${note}`;
+}
+
+/* high-value preferences: ALWAYS surfaced in context (bounded), because an
+   explicit "I hate X / I like Y" must steer any later open-ended request. */
+export function recallPreferences(limit = 6): MemoryItem[] {
+  const WEEK = 7 * 24 * 3600e3;
+  return loadMemories()
+    .filter((m) => m.kind === "pref")
+    .map((item) => ({
+      item,
+      score:
+        parseFloat(item.meta?.confidence ?? "0.5") * 0.7 +
+        (Date.now() - item.ts < WEEK ? 0.3 : 0),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((x) => x.item);
+}
+
+/* ════════════════════════════════════════
+   EXPLICIT FEEDBACK — "I hate repetitive quizzes, I like guessing games"
+   ════════════════════════════════════════ */
+
+const FB_STOP = new Set([
+  "a", "an", "the", "to", "for", "with", "and", "or", "but", "of", "at", "in",
+  "repetitive", "repeated", "those", "these", "that", "this", "so", "many",
+  "much", "very", "really", "quite", "playing", "play", "playing", "get", "got",
+]);
+
+function fbNounKey(phrase: string): string {
+  const t = phrase
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 3 && !FB_STOP.has(w));
+  const last = t[t.length - 1];
+  return (last || phrase.trim().toLowerCase().slice(0, 24) || "topic").slice(0, 24);
+}
+
+/* EN negative: "i hate repetitive quizzes", "i don't like trivia", "no more quizzes", "stop the riddles" */
+const FB_NEG_EN =
+  /\b(?:i (?:really |definitely |just )?(?:hate|dislike|can'?t stand|am (?:tired|sick|bored) of|don'?t like|do not like)) +([a-z][a-z ]{1,48})|(?:no more|stop (?:with the |doing |the )?)(quiz(?:zes|z)?|games|jokes|riddles|trivia|guessing|questions)/gi;
+/* EN positive: "i love guessing games", "i like riddles" */
+const FB_POS_EN =
+  /\b(?:i (?:really |definitely |just )?(?:love|like|prefer|enjoy)|i (?:love|like|prefer|enjoy)) +([a-z][a-z ]{1,48})/gi;
+const FB_NEG_ZH = /(?:我不喜欢|我不爱|我讨厌|讨厌|不喜欢|不要|别再|别老是|别总|受不了)([^。！？；,，。'"“”]{1,24})/g;
+const FB_POS_ZH = /(?:我喜欢|我爱|我更喜欢|喜欢|最爱)([^。！？；,，。'"“”]{1,24})/g;
+
+function savePreference(phrase: string, neg: boolean): void {
+  const key = fbNounKey(phrase);
+  const detail = phrase.trim().replace(/\s+$/, "");
+  /* latest wins on the topic: drop any prior record on the same key */
+  forgetMemory(`key:${key}`);
+  upsertMemory("pref", `The user ${neg ? "dislikes" : "likes"} ${detail}.`, {
+    memoryType: neg ? "permanent" : "temporary",
+    category: "hobby",
+    key,
+    source: "explicit",
+    confidence: "0.95",
+    scope: "global",
+  });
+}
+
+/** Persist explicit like/dislike statements as durable preferences.
+    Returns how many were captured (0 if none). */
+export function captureFeedback(text: string): number {
+  const found: { phrase: string; neg: boolean }[] = [];
+  for (const m of text.matchAll(FB_NEG_EN)) {
+    const g = m[1] ?? m[2];
+    if (g?.trim()) found.push({ phrase: g.trim(), neg: true });
+  }
+  for (const m of text.matchAll(FB_POS_EN)) {
+    const g = m[1];
+    if (g && !/^([a-z]+ )?\b(it|this|that|those|these|you|him|her|them|myself)\b/i.test(g.trim()))
+      found.push({ phrase: g.trim(), neg: false });
+  }
+  for (const m of text.matchAll(FB_NEG_ZH)) {
+    if (m[1]?.trim()) found.push({ phrase: m[1].trim(), neg: true });
+  }
+  for (const m of text.matchAll(FB_POS_ZH)) {
+    /* bare "喜欢" also fires inside "我不喜欢" — reject when negated */
+    const pre = text[m.index - 1];
+    if (pre === "不" || pre === "别") continue;
+    if (m[1]?.trim()) found.push({ phrase: m[1].trim(), neg: false });
+  }
+  const seen = new Set<string>();
+  for (const f of found) {
+    const k = `${f.neg}:${f.phrase.toLowerCase()}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    savePreference(f.phrase, f.neg);
+  }
+  return seen.size;
 }
 
 /* ════════════════════════════════════════

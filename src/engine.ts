@@ -17,6 +17,7 @@ export type Intent =
   | "recall"
   | "whoami"
   | "time"
+  | "map"
   | "chat";
 
 export interface SourceRef {
@@ -76,6 +77,8 @@ export function detectIntent(raw: string): Intent {
     return "recall";
   if (/(who am i|who is your master|who is my|my name|我是谁|你的主人|我叫)/.test(t))
     return "whoami";
+  if (/(where is|where's|where are|locate|find .* on (the )?map|show .* on (the )?map|directions? to|navigate to|take me to|在哪|位置|定位|导航|地图)/.test(t))
+    return "map";
   if (/(youtube|yt video|youtube video|video of|watch .* on youtube|看视频|视频)/.test(t))
     return "youtube";
   if (/(play music|play a song|play some music|play .* on (spotify|music)|music|song|音乐|播放|放歌|点歌)/.test(t))
@@ -177,6 +180,14 @@ export function openPayload(text: string): string {
     .toLowerCase()
     .replace(/^(play|show|open|search|find|bring|watch|put on|播放|放|打开|搜|找)\s+/gi, "")
     .replace(/\b(on youtube|from youtube|on spotify|on youtube music|in youtube|youtube|music|video|song|a|an|the|please|for me|now)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function mapPayload(text: string): string {
+  return text
+    .replace(/^(where is|where's|where are|locate|find|show me|show|take me to|navigate to|directions? to|在哪|位置|定位|导航到?)\s*/i, "")
+    .replace(/\b(on the map|on map|on a map|please|for me|the|a|an)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
 }

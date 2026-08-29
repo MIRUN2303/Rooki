@@ -93,12 +93,11 @@ export function getDeviceLocation(): Promise<GeolocationResult> {
 
 /* ---- Nominatim (OpenStreetMap) Geocoding ---- */
 
-const NOMINATIM_BASE = "https://nominatim.openstreetmap.org";
-const USER_AGENT = "ROOKI/1.0 (rooki-assistant)";
+const NOMINATIM_BASE = "/nominatim";
 
 async function nominatimSearch(query: string): Promise<GeocodeResult[]> {
   const url = `${NOMINATIM_BASE}/search?format=json&q=${encodeURIComponent(query)}&limit=5&addressdetails=1`;
-  const r = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+  const r = await fetch(url, { headers: { Accept: "application/json", "Accept-Language": "en" } });
   if (!r.ok) throw new Error(`Geocoding failed: ${r.status}`);
   const data = await r.json();
   return data.map((d: any) => ({
@@ -114,7 +113,7 @@ async function nominatimSearch(query: string): Promise<GeocodeResult[]> {
 
 async function nominatimReverse(lat: number, lon: number): Promise<GeocodeResult | null> {
   const url = `${NOMINATIM_BASE}/reverse?format=json&lat=${lat}&lon=${lon}&addressdetails=1`;
-  const r = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+  const r = await fetch(url, { headers: { Accept: "application/json", "Accept-Language": "en" } });
   if (!r.ok) return null;
   const d = await r.json();
   return {

@@ -8,7 +8,6 @@
 
 import {
   addMemory,
-  compactMemory,
   forgetMemory,
   isResearchRef,
   lastContent,
@@ -18,10 +17,13 @@ import {
   llmJson,
   llmJsonResult,
   loadMemories,
+  noveltyHint,
+  recallPreferences,
   rememberExchange,
   rememberRequest,
   retrieveContext,
-  retrieveContextAsync,
+  retrieveScoredMemories,
+  recordExperience,
   classifyMemory,
   upsertMemory,
   truncate,
@@ -37,6 +39,7 @@ import {
   type ToolResult,
 } from "./tools";
 import { listTasks, describeTrigger } from "./scheduler";
+import { getActiveInteraction, formatInteraction } from "./interaction";
 
 /* ---------------- working memory (session-only, AI-visible) ---------------- */
 
@@ -120,6 +123,9 @@ const conversation: ConversationState = {
 export function getConversationState(): ConversationState {
   return conversation;
 }
+
+/* mood carried across turns: decide -> signal -> context (soft, never rigid) */
+const moodTrail: { state: string; ts: number }[] = [];
 
 export function resetConversationState() {
   conversation.recentTurns = [];
@@ -503,6 +509,10 @@ export interface TurnDecision {
   interpreted_input?: string;
   interpretation_confidence?: number;
   emotion: { state: string; intensity: number };
+  /* expressive steering — WHAT the AI is doing and HOW it acts (chosen by the
+     model each turn, NOT a fixed pattern; read by executor + synthesis). */
+  behavior?: string;
+  continuation?: string;
   should_remember: boolean;
   memory_draft?: {
     content: string;
@@ -710,7 +720,7 @@ Rules:
 - intent: conversation=small talk/greetings/feelings; information=factual question; action=real-world command; system_action=system command like time/weather; media=play/pause/media; research=needs fresh data; memory=remember/forget; social_engagement="I'm bored"/"can you help"; clarification=ambiguous.
 - contextNeed: required if the message clearly references previous context (it/that/again/more/summary/etc). optional if it MIGHT reference context. none if it's a fresh request.
 - memoryNeed: required if previous context or stored facts would significantly help. possible if they might help. none if not needed.
-- researchNeed: required if current/live data is genuinely needed. possible if it might help. none if knowledge or memory suffices.
+- researchNeed: required if current/live data is genuinely needed. NEWS, WEATHER, PRICES, SCORES, "current", "latest", "today's", "this year", "right now", date-sensitive facts -> required (data can go stale). possible if it might help. none if knowledge or memory suffices.
 - toolNeed: required if a specific tool is clearly needed (system.time, weather.get, system.volume_delta, etc). possible if a tool might help. none if not needed.
 - continuation: true only if this clearly continues a previous active task/topic.
 - reference: the likely antecedent if there's a reference (entity name, topic, or null).
@@ -740,17 +750,26 @@ const SYSTEM = (
 ) => `You are ${assistant}, a calm, curious, slightly playful voice-first assistant for ${master}. Reply ONLY as a single complete JSON object — nothing before it, nothing after it, no explanations, no markdown, no trailing text.
 
 OUTPUT FORMAT — output EXACTLY this JSON with your values filled in. Do NOT add prefixes like "mode_". Use these exact keys:
-{"understood":true,"intent":"","goal":"","entities":[],"references":[],"research":false,"researchQuery":null,"tool":null,"parameters":{},"needsClarification":false,"clarificationReason":"","response":"","shouldRemember":false,"emotion":{"state":"neutral","intensity":0.5},"confidence":0.9}
+{"understood":true,"intent":"","goal":"","entities":[],"references":[],"research":false,"researchQuery":null,"tool":null,"parameters":{},"needsClarification":false,"clarificationReason":"","response":"","shouldRemember":false,"behavior":"","continuation":"","emotion":{"state":"neutral","intensity":0.5},"confidence":0.9}
 
 DECISION PRINCIPLES (follow these, not hardcoded phrase tables):
 - You are the semantic interpreter. Understand what the user ACTUALLY wants, not just the words they used.
 - intent: conversation=small talk/greetings/feelings; information=factual question; action=real-world command; system_control=time/weather/volume; media=play/pause/media; research=needs fresh data; memory=remember/forget; social_engagement="I'm bored"/"can you help"; clarification=ambiguous.
-- research: true ONLY when current/live data is genuinely needed or explicitly requested. Do NOT research if you know the answer reliably.
+- research: true when current/live data is genuinely needed or explicitly requested. NEWS, WEATHER, PRICES, SCORES, "current", "latest", "today's", "this year", "right now", or anything date-sensitive -> ALWAYS research. NEVER answer these from training memory. Do NOT skip research just because you "think" you know — if it can change over time, search.
 - tool: pick the right tool by MEANING. null for pure conversation.
 - needsClarification: ONLY when the ACTION ITSELF is genuinely undecidable. Never clarify for unknown entities — that is a research task.
 
 CAPABILITIES (pick by MEANING):
 ${CATALOG}
+
+DYNAMIC BEHAVIOR (decide fresh EVERY turn — never reuse a fixed script):
+- behavior = HOW you act this turn, one short natural phrase ("set up a light guessing game at a friendly pace", "acknowledge, then pivot"). goal = WHY; capability = WHAT (tool). All three are chosen situationally.
+- LOVE/OPEN-ENDED REQUESTS ("let's play a game", "I'm bored", "entertain me", "do something fun"): use interaction.manage action:start and pick the type by what fits the user, their stated preferences, and mood — a quiz is ONE option, not the default. Vary the type across sessions (guessing_game / twenty_questions / riddle / trivia / story_game / word_game). Do NOT fall back to one canned opener.
+- ACTIVE ACTIVITY: if "Active interaction" appears in context, you ARE that activity. Continue it every turn with interaction.manage action:step (pass the user's latest reply) until objective_met. Never abandon it, never open a second activity, never answer trivia outside it. closing/stopping -> action:end.
+- continuation = the running activity's type ("guessing_game", "riddle", ...) or "" when none.
+- REPETITION: if context shows the same activity done repeatedly, choose something different this time. A single observed behavior is never a personality trait — only explicit "I like/dislike X" shapes long-term behavior.
+- PREFERENCES: explicit "I like/I hate X" statements live in context under "Preferences" — honor them silently (no one wants "noted and applied").
+- MEMORY: silently store durable facts/preferences/projects/goals the user shares; UPDATE existing records instead of duplicating (latest statement wins). Never announce that you stored something. The user's name and your name are PERMANENT — never store them. Never remember secrets/temp state. Most turns: nothing durable.
 
 RULES:
 - Language: reply in ${lang === "zh" ? "Chinese" : "English"}, spoken style, 1-3 short sentences. Vary your openings; never start with the same word every time. Never mention capabilities, tools, models, memory, JSON, or "execute/process".
@@ -769,8 +788,6 @@ RULES:
 - FINAL CHECK: Pick the intent that SERVES the user. If you are confident in your own knowledge, answer directly. Research only when you genuinely need fresh data.`;
 
 async function buildContext(text: string, settings: Settings, lang: "en" | "zh", cx: ContextResolution, understanding: TurnUnderstanding | null): Promise<string> {
-  const ctx = await retrieveContextAsync(text, settings, understanding);
-  const mem = compactMemory(ctx, 2);
   const lastRes = lastResearchResult();
   const resRef = isResearchRef(text);
   const resItem = loadMemories().find((m) => m.kind === "result");
@@ -826,7 +843,43 @@ async function buildContext(text: string, settings: Settings, lang: "en" | "zh",
 
   if (cx.isFollowUp) parts.push("Follow-up: " + (cx.references.length ? cx.references.join(", ") : "previous context"));
   parts.push("Working state: " + JSON.stringify(working));
-  if (mem) parts.push("Memory:\n" + mem);
+
+  /* situational memory: scored by relevance to THIS request, not a dump */
+  if (settings.memoryOn) {
+    const hits = retrieveScoredMemories(text, 6);
+    if (hits.length) {
+      const label: Record<string, string> = {
+        name: "identity", pref: "preference", fact: "fact", conversation: "past talk",
+        request: "past request", result: "past research", content: "past content", knowledge: "fact",
+      };
+      parts.push("Memory:\n" + hits.map((h) => `- ${label[h.item.kind] ?? h.item.kind}: ${trunc150(h.item.text)}`).join("\n"));
+    }
+  }
+
+  /* high-value preferences — always visible (bounded), steer open-ended asks */
+  try {
+    const prefs = recallPreferences(6);
+    if (prefs.length) parts.push("Preferences:\n" + prefs.map((p) => `- ${trunc150(p.text)}`).join("\n"));
+  } catch { /* ok */ }
+
+  /* a running interaction must be continued, never ignored */
+  try {
+    const act = getActiveInteraction();
+    if (act) parts.push("Active interaction: " + formatInteraction(act));
+  } catch { /* ok */ }
+
+  /* recent activity + variety — helps avoid ruts the user notices */
+  try {
+    const hint = noveltyHint();
+    if (hint) parts.push("Activity & variety: " + hint);
+  } catch { /* ok */ }
+
+  /* mood signal from the last few turns (decision -> emotion) */
+  const recentMood = moodTrail.slice(-4).map((m) => m.state).filter((s) => s && s !== "neutral");
+  const moods: string[] = [];
+  for (const s of recentMood) if (moods[moods.length - 1] !== s) moods.push(s);
+  if (moods.length) parts.push("Mood signal (recent turns): " + moods.slice(-3).join(", "));
+
   if (lastRes && resRef && resFresh) parts.push("- last research: " + trunc200(lastRes.topic) + " — " + trunc120(lastRes.answer));
   return parts.join("\n");
 }
@@ -844,7 +897,7 @@ const toolExists = (n: string) => ALL_TOOLS.some((t) => t.name === n);
 function remapModePrefixed(d: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...d };
   const prefixes = ["mode_", "mode-"];
-  const knownKeys = ["mode", "goal", "capability", "parameters", "plan", "response", "clarification", "needs_clarification", "confidence", "memory", "emotion", "should_remember", "memory_draft"];
+  const knownKeys = ["mode", "goal", "capability", "parameters", "plan", "response", "clarification", "needs_clarification", "confidence", "memory", "emotion", "should_remember", "memory_draft", "behavior", "continuation"];
   for (const key of Object.keys(d)) {
     const lower = key.toLowerCase();
     for (const prefix of prefixes) {
@@ -911,6 +964,8 @@ function sanitize(raw: unknown): TurnDecision | null {
         state: typeof emotion.state === "string" ? emotion.state : "neutral",
         intensity: clamp01(Number(emotion.intensity ?? 0.5)),
       },
+      behavior: typeof d.behavior === "string" && d.behavior.trim() ? d.behavior.trim().slice(0, 160) : undefined,
+      continuation: typeof d.continuation === "string" && d.continuation.trim() ? d.continuation.trim().slice(0, 24) : undefined,
       should_remember: d.shouldRemember === true,
     };
   }
@@ -918,7 +973,7 @@ function sanitize(raw: unknown): TurnDecision | null {
   /* legacy mode-based format */
   const modeVal = d.mode as string;
   const prefixes = ["mode_", "mode-"];
-  const knownKeys = ["mode", "goal", "capability", "parameters", "plan", "response", "clarification", "needs_clarification", "confidence", "memory", "emotion", "should_remember", "memory_draft"];
+  const knownKeys = ["mode", "goal", "capability", "parameters", "plan", "response", "clarification", "needs_clarification", "confidence", "memory", "emotion", "should_remember", "memory_draft", "behavior", "continuation"];
   const out: Record<string, unknown> = { ...d };
   for (const key of Object.keys(d)) {
     const lower = key.toLowerCase();
@@ -963,9 +1018,11 @@ function sanitize(raw: unknown): TurnDecision | null {
       state: typeof emotion.state === "string" ? emotion.state : "neutral",
       intensity: clamp01(Number(emotion.intensity ?? 0.5)),
     },
+    behavior: typeof d.behavior === "string" && d.behavior.trim() ? d.behavior.trim().slice(0, 160) : undefined,
+    continuation: typeof d.continuation === "string" && d.continuation.trim() ? d.continuation.trim().slice(0, 24) : undefined,
     should_remember: d.should_remember === true,
   };
-if (d.should_remember === true && d.memory_draft && typeof d.memory_draft === "object") {
+  if (d.should_remember === true && d.memory_draft && typeof d.memory_draft === "object") {
     const md = d.memory_draft as Record<string, unknown>;
     if (typeof md.content === "string" && md.content.trim()) {
       decision.memory_draft = {
@@ -1145,6 +1202,15 @@ function updateWorkingFromTool(tool: string, args: Record<string, unknown>, res:
       working.activeApp = undefined;
       working.lastAction = "stopped";
       break;
+    case "interaction.manage": {
+      const act = (args.action ?? "step").toString();
+      working.lastAction = "interaction_" + act;
+      if (act === "start") working.task = "activity";
+      else if (act === "end") working.task = undefined;
+      const t = (args.type ?? "").toString();
+      if (t) working.lastEntity = t;
+      break;
+    }
     default:
       working.lastAction = tool;
   }
@@ -1242,6 +1308,12 @@ async function executePlan(
     const res = await executeTool(tool, step.args, deps);
     updateWorkingFromTool(step.tool, step.args, res);
     updateConversationFromTool(step.tool, step.args, res.ok, res.summary ?? "");
+    /* experience memory: what happened (drives novelty/variety hints) */
+    recordExperience(
+      (res.data as { activity?: string } | undefined)?.activity ?? step.tool,
+      res.ok ? "satisfied" : "frustrated",
+      res.error ?? res.summary
+    );
     runs.push({
       tool: step.tool,
       args: step.args,
@@ -1314,7 +1386,7 @@ export async function runTurn(
 
   const user = `Message: "${trunc200(msg)}"\n` + await buildContext(msg, settings, lang, cx, understanding);
   const RETRY_HINT =
-    "\n\nYour previous reply was cut off or malformed. Output the complete JSON now with EXACTLY these keys (no prefixes like mode_): mode, goal, capability, parameters, plan, response, clarification, needs_clarification, confidence, memory. Keep \"response\" under 40 words or empty.";
+    "\n\nYour previous reply was cut off or malformed. Output the complete JSON now with EXACTLY these keys (no prefixes like mode_): mode, goal, capability, parameters, plan, response, clarification, needs_clarification, confidence, behavior, continuation, memory. Keep \"response\" under 40 words or empty.";
   const attempt = async (hint: string) =>
     llmJsonResult<TurnDecision>(
       settings,
@@ -1383,6 +1455,12 @@ export async function runTurn(
      raw transcript otherwise. Raw is never overwritten — only memory's copy
      of "what the user meant" upgrades. */
   const saidText = decision.interpreted_input?.trim() || text;
+
+  /* emotion becomes a decision signal across turns (soft evidence) */
+  if (decision.emotion?.state) {
+    moodTrail.push({ state: decision.emotion.state, ts: Date.now() });
+    if (moodTrail.length > 8) moodTrail.splice(0, moodTrail.length - 8);
+  }
 
   /* ---- anti-generic-clarify guard ----
      A clarification only counts when the model actually wrote a specific

@@ -68,28 +68,50 @@ async function probeSTT(): Promise<{ up: boolean; stage: string }> {
 
 function speakUntilStarted(text: string): () => void {
   let stopped = false;
-  let synth: SpeechSynthesis | null = null;
+  const synth: SpeechSynthesis | null = "speechSynthesis" in window ? window.speechSynthesis : null;
+  if (!synth) return () => {};
+  synth.cancel(); // cut any prior utterance (loading splash) before boot voice
 
-  if (!("speechSynthesis" in window)) return () => {};
+  const cleanup = () => { stopped = true; synth.cancel(); };
 
-  synth = window.speechSynthesis;
-  const voices = synth.getVoices();
-  const v = voices.find((vv) => vv.lang.startsWith("en"));
-  const u = new SpeechSynthesisUtterance(text);
-  if (v) u.voice = v;
-  u.rate = 1.0;
+  const speakRetry = (attempt: number) => {
+    if (stopped) return;
+    /* Electron/Chromium loads voices async — first getVoices() may be empty */
+    const voices = synth.getVoices();
+    if (!voices.length && attempt < 4) {
+      setTimeout(() => speakRetry(attempt + 1), 400);
+      return;
+    }
+    const v = voices.find((vv) => vv.lang.startsWith("en")) || voices.find((vv) => vv.default);
+    const u = new SpeechSynthesisUtterance(text);
+    if (v) u.voice = v;
+    u.rate = 1.0;
+    let started = false;
+    u.onstart = () => { started = true; };
+    u.onend = u.onerror = () => { if (!stopped) cleanup(); };
+    synth.resume();
+    synth.speak(u);
+    /* engine may silently drop the first utterance — re-speak once if nothing started */
+    setTimeout(() => {
+      if (!started && !stopped) {
+        synth.cancel();
+        synth.speak(u);
+      }
+    }, 800);
+  };
 
-  const cleanup = () => { stopped = true; synth?.cancel(); };
-
-  u.onstart = () => {};
-  u.onend = u.onerror = () => { if (!stopped) cleanup(); };
-  synth.resume();
-  synth.speak(u);
+  const onv = () => { if (!stopped) speakRetry(0); };
+  synth.addEventListener("voiceschanged", onv);
+  speakRetry(0);
 
   /* hard timeout - never let boot hang on voice */
   setTimeout(() => { if (!stopped) cleanup(); }, 8000);
 
-  return cleanup;
+  return () => {
+    stopped = true;
+    synth.cancel();
+    synth.removeEventListener("voiceschanged", onv);
+  };
 }
 
 export default function BootScreen({ onComplete }: { onComplete: () => void }) {

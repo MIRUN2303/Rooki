@@ -294,7 +294,6 @@ export function speak(text: string, lang: "en" | "zh", style?: { rate: number; p
       return;
     }
     const e = Math.sin(Math.PI * Math.min(1, t * 1.12)) ** 1.3;
-    audio.level = e * (0.5 + 0.45 * Math.sin(t * 42) * Math.sin(t * 13.7));
     audio.amplitude = e * 0.9 + audio.amplitude * 0.1;
     audio.pitch = 0.42 + 0.22 * Math.sin(t * 29);
     for (let i = 0; i < audio.freq.length; i++) {
@@ -316,4 +315,8 @@ export function stopSpeaking() {
   if ("speechSynthesis" in window) window.speechSynthesis.cancel();
   currentUtterance = null;
   stopEnvelope();
+}
+
+export function isSpeaking() {
+  return currentUtterance !== null;
 }
