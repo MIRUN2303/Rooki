@@ -12,8 +12,10 @@ import {
   stopRecord,
   resetRecord,
   speak,
+  speakQueued,
   stopSpeaking,
   isSpeaking,
+  isTranscriptionQuiet,
   STATE_COLORS,
   type VoiceState,
   getInputDeviceId,
@@ -79,10 +81,19 @@ import VocalMeter from "./VocalMeter";
 import type { Message } from "./Chat";
 import type { MicResult } from "./voice";
 import { callAgent } from "./agent";
-import { youtubeMusicSearch, youtubeVideoSearch, type MediaItem } from "./tools";
+import {
+  youtubeMusicSearch,
+  youtubeVideoSearch,
+  toolByName,
+  executeTool,
+  type MediaItem,
+  type ToolResult,
+  type ToolDef,
+  type ToolDeps,
+} from "./tools";
 import BootScreen from "./BootScreen";
 import SchedulerPanel, { SchedulerToasts } from "./SchedulerPanel";
-import { startScheduler, listTasks } from "./scheduler";
+import { startScheduler, listTasks, onNotification } from "./scheduler";
 import DailyBriefing, {
   getTimeGreeting,
   isFirstLoginToday,
@@ -150,6 +161,7 @@ export default function App() {
   const timersRef = useRef<number[]>([]);
   const chatListRef = useRef<HTMLDivElement>(null);
   const turnRef = useRef(false);
+  const pendingRef = useRef<string[]>([]);
   const lastResearchRef = useRef<ResearchResult | null>(null);
   const sessionNotesRef = useRef<string[]>([]);
   const [sttText, setSttText] = useState<{ text: string; n: number } | null>(null);
@@ -231,6 +243,17 @@ export default function App() {
     if (!booted) return;
     startScheduler();
   }, [booted]);
+
+  /* speak reminders/notifications aloud (queued — never cuts a reply) */
+  useEffect(() => {
+    if (!booted || !speakOn) return;
+    return onNotification((n) => {
+      const lang = langRef.current;
+      const msg = n.message ? `. ${n.message}` : "";
+      const line = n.missed ? `${n.title}${msg}` : `${lang === "en" ? "Reminder." : "提醒。"} ${n.title}${msg}`;
+      speakQueued(line, lang);
+    });
+  }, [booted, speakOn]);
 
   /* daily briefing — first login of day only */
   useEffect(() => {
@@ -423,7 +446,7 @@ export default function App() {
       stopListening();
       return;
     }
-    if (busyRef.current || sttPendingRef.current) return;
+    if (sttPendingRef.current) return; /* a pending auto-send will submit */
     startMic(getInputDeviceId()).then((r) => {
       if (!r.ok) {
         pushMsg({ role: "ai", text: micFailMsg(r) });
@@ -456,10 +479,17 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
 
   /* utterance segmentation: end after ~1.2s of silence following speech */
   useEffect(() => {
-    if (phase !== "listening") return;
+    if (phase !== "listening" && phase !== "researching") return;
     let speechSince = 0;
     let silenceSince = 0;
     const iv = setInterval(() => {
+      if (isTranscriptionQuiet()) {
+        /* ROOKI's own queued speech (reminders / instant replies) is audible —
+           don't let the mic turn it into a user utterance */
+        speechSince = 0;
+        silenceSince = 0;
+        return;
+      }
       if (audio.level > 0.07) {
         silenceSince = 0;
         speechSince = speechSince || Date.now();
@@ -608,6 +638,9 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     if (seq !== researchSeqRef.current) return null;
     setResearchActive(false);
     busyRef.current = false;
+    /* release any request that arrived mid-research (no-provider busy window) */
+    const next = pendingRef.current.shift();
+    if (next) send(next);
 
     if (!res) {
       onLog(lang === "en" ? "Research failed." : "研究失败。", "error");
@@ -732,6 +765,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     researchSeqRef.current++;
     busyRef.current = false;
     turnRef.current = false;
+    pendingRef.current = []; /* "stop" drops deferred work too */
     setResearchActive(false);
     setPhaseBoth("idle");
     answer(reply ?? (lang === "zh" ? "好，停下来了。" : "Okay, stopping."));
@@ -1092,12 +1126,198 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     asrRef.current = 0;
   };
 
+  /* ---------------- low-level binds (always-on, never wait for the LLM) ----------------
+     Volume / brightness / media transport / blunt stop answer instantly even while
+     another turn is mid-flight (researching, thinking, speaking). Music keeps
+     playing and a command still lands — that's the multi-task contract. */
+
+  const makeDeps = (raw: string, lang: Lang): ToolDeps => ({
+    lang,
+    settings,
+    performOpen: (kind, q, l) => performOpen(kind, q, l),
+    startResearch: (r, l, followUp, silent, mode) => startResearch(r, l, followUp, silent, mode),
+    stopAll: (l) => stopAll(l),
+    userText: raw,
+  });
+
+  /* a fast-bind confirmation: chat bubble + queued voice (joins the native
+     queue — never cuts the in-flight answer), phase state untouched */
+  const quickReply = (text: string) => {
+    pushMsg({ role: "ai", text, accent: STATE_COLORS.speaking.accent });
+    if (speakOn) speakQueued(text, langRef.current);
+  };
+
+  /* parse a percent out of whatever the OS bridge returned for get_* */
+  const readPct = (r: ToolResult): number | null => {
+    try {
+      const m = JSON.stringify(r.data ?? "").match(/-?\d{1,3}/);
+      return m ? Math.max(0, Math.min(100, parseInt(m[0], 10))) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const matchFastCommand = (raw: string, lang: Lang): { run: () => Promise<void> } | null => {
+    const t = raw.trim().toLowerCase();
+    const zh = lang === "zh";
+    const deps = () => makeDeps(raw, lang);
+    const act = async (
+      name: string,
+      args: Record<string, unknown>,
+      ok: string,
+      bad: string
+    ) => {
+      const r = await executeTool(toolByName(name) as ToolDef, args, deps());
+      quickReply(r.ok ? ok : bad);
+    };
+
+    /* blunt stop — wins over any ongoing turn */
+    if (/\b(stop|stop all|shut ?up|quit)\b|停下|停止|别说了|闭嘴|住口|安静/.test(t)) {
+      return {
+        run: async () => {
+          window.dispatchEvent(new CustomEvent("rooki-media", { detail: { action: "pause" } }));
+          stopAll(lang);
+        },
+      };
+    }
+
+    /* image-editing context ("brightness of the image") is NOT the display */
+    if (/image|photo|picture|pic|图片|照片|海报|图像/.test(t)) return null;
+
+    const target: "volume" | "brightness" | null =
+      /volume|音量|声音/.test(t) ? "volume" : /brightness|亮度/.test(t) ? "brightness" : null;
+
+    if (!target) {
+      const mPrev = /\bprevious\b|上一首|上一曲|回头/.test(t);
+      const mNext = /\bnext\b|\bskip\b|下一首|下一曲|切歌|换一首/.test(t);
+      const mPause = /\bpause\b|暂停|停一下/.test(t);
+      const mResume = /\bresume\b|继续|接着放|再放/.test(t);
+      if (!mPrev && !mNext && !mPause && !mResume) return null;
+      const action = mPause ? "pause" : mResume ? "resume" : mNext ? "next" : "previous";
+      return {
+        run: () =>
+          act(
+            "media.control",
+            { action },
+            zh ? "好的，已经处理。" : "Okay, done.",
+            zh ? "当前没有正在播放的内容。" : "Nothing is playing right now."
+          ),
+      };
+    }
+
+    const numMatch = t.match(/(\d{1,3})(\s*(%|percent|百分比))?/);
+    const to = numMatch ? Math.max(0, Math.min(100, parseInt(numMatch[1], 10))) : null;
+    const up = /up|raise|increase|more|louder|调大|调高|加大|提高|大点|大一点/.test(t);
+    const down = /down|lower|decrease|reduce|quieter|调小|调低|减小|降低|小点|小一点/.test(t);
+    const explicitSet = /\bset\b|\bto\b|到|设为|调成/.test(t);
+
+    if (target === "volume") {
+      if (/\b(mute|muted)\b|静音/.test(t))
+        return { run: () => act("system.volume_mute", {}, zh ? "已静音。" : "Muted.", zh ? "静音失败。" : "Couldn't mute.") };
+      if (to != null)
+        return {
+          run: () =>
+            act(
+              "system.volume_set",
+              { value: to },
+              zh ? `音量设为 ${to}%。` : `Volume set to ${to}%.`,
+              zh ? "设置音量失败。" : "Failed to set the volume."
+            ),
+        };
+      if (up)
+        return {
+          run: () =>
+            act(
+              "system.volume_delta",
+              { delta: 10 },
+              zh ? "音量已调大。" : "Volume up.",
+              zh ? "调高音量失败。" : "Couldn't turn the volume up."
+            ),
+        };
+      if (down)
+        return {
+          run: () =>
+            act(
+              "system.volume_delta",
+              { delta: -10 },
+              zh ? "音量已调小。" : "Volume down.",
+              zh ? "调低音量失败。" : "Couldn't turn it down."
+            ),
+        };
+      return {
+        run: async () => {
+          const r = await executeTool(toolByName("system.volume_get") as ToolDef, {}, deps());
+          const v = readPct(r);
+          if (!r.ok || v == null) return quickReply(zh ? "读不到当前音量。" : "Can't read the volume right now.");
+          quickReply(zh ? `当前音量是 ${v}%。` : `Volume is at ${v}%.`);
+        },
+      };
+    }
+
+    /* brightness — no delta tool, so step via get+set */
+    if (to != null && explicitSet) {
+      const v = to;
+      return {
+        run: () =>
+          act(
+            "system.brightness_set",
+            { value: v },
+            zh ? `亮度设为 ${v}%。` : `Brightness set to ${v}%.`,
+            zh ? "设置亮度失败。" : "Failed to set brightness."
+          ),
+      };
+    }
+    if (up || down) {
+      const delta = up ? 15 : -15;
+      return {
+        run: async () => {
+          const g = await executeTool(toolByName("system.brightness_get") as ToolDef, {}, deps());
+          const cur = readPct(g);
+          if (!g.ok || cur == null)
+            return quickReply(zh ? "调不了，读不到当前亮度。" : "Can't adjust brightness — can't read the current value.");
+          const next = Math.max(0, Math.min(100, cur + delta));
+          const r = await executeTool(toolByName("system.brightness_set") as ToolDef, { value: next }, deps());
+          quickReply(
+            r.ok ? (zh ? (up ? "亮度调高了。" : "亮度调低了。") : up ? "Brightened." : "Dimmed.") : zh ? "调整亮度失败。" : "Failed to change brightness."
+          );
+        },
+      };
+    }
+    if (to != null)
+      return {
+        run: () =>
+          act(
+            "system.brightness_set",
+            { value: to },
+            zh ? `亮度设为 ${to}%。` : `Brightness set to ${to}%.`,
+            zh ? "设置亮度失败。" : "Failed to set brightness."
+          ),
+      };
+    return {
+      run: async () => {
+        const r = await executeTool(toolByName("system.brightness_get") as ToolDef, {}, deps());
+        const v = readPct(r);
+        if (!r.ok || v == null) return quickReply(zh ? "读不到当前亮度。" : "Can't read the brightness right now.");
+        quickReply(zh ? `当前亮度是 ${v}%。` : `Brightness is at ${v}%.`);
+      },
+    };
+  };
+
   const send = (raw: string) => {
-    if (busyRef.current || turnRef.current || sttPendingRef.current) return;
     const lang: Lang = /[\u4e00-\u9fa5]/.test(raw) ? "zh" : "en";
     langRef.current = lang;
-    void rememberLanguage(lang); /* silent identity — deduped by key */
-    /* explicit like/dislike statements become durable preferences */
+    const fast = matchFastCommand(raw, lang);
+    if (fast) {
+      pushMsg({ role: "user", text: raw });
+      void fast.run();
+      return;
+    }
+    if (busyRef.current || turnRef.current || sttPendingRef.current) {
+      /* a turn is in flight — hold the request, re-inject it when it finishes */
+      pendingRef.current.push(raw);
+      return;
+    }
+    void rememberLanguage(lang);
     captureFeedback(raw);
     pushMsg({ role: "user", text: raw });
     /* a new turn must not inherit the previous turn's research panel */
@@ -1116,6 +1336,9 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
       turnRef.current = true;
       aiTurn(raw, lang).finally(() => {
         turnRef.current = false;
+        /* run any command that arrived while this turn was busy */
+        const next = pendingRef.current.shift();
+        if (next) send(next);
       });
     } else {
       fallbackSend(raw, lang);

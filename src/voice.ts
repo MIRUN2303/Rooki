@@ -317,6 +317,30 @@ export function stopSpeaking() {
   stopEnvelope();
 }
 
+let quietUntilAt = 0;
+/** while true, the mic layer must NOT auto-transcribe (ROOKI's own queued
+    speech or system sounds are audible); the app checks this before firing
+    an utterance. */
+export function isTranscriptionQuiet() {
+  return Date.now() < quietUntilAt;
+}
+
+/* Speak but DON'T cancel what's already playing — joins the native queue.
+   Used for reminders/notifications: they never cut off a reply in progress,
+   and any later speak()/stopSpeaking() (e.g. a fresh response) drops them. */
+export function speakQueued(text: string, lang: "en" | "zh") {
+  if (!("speechSynthesis" in window) || !text) return;
+  quietUntilAt = Date.now() + 600 + text.length * (lang === "zh" ? 95 : 60);
+  const u = new SpeechSynthesisUtterance(text);
+  const voices = window.speechSynthesis.getVoices();
+  const v = voices.find((vv) => vv.lang.startsWith(lang === "zh" ? "zh" : "en"));
+  if (v) u.voice = v;
+  u.rate = 1.02;
+  u.pitch = 1;
+  window.speechSynthesis.resume();
+  window.speechSynthesis.speak(u);
+}
+
 export function isSpeaking() {
   return currentUtterance !== null;
 }

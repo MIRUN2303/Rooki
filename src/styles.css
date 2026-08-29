@@ -5702,14 +5702,59 @@ button { -webkit-tap-highlight-color: transparent; }
 .scheduler-cell.sel .scheduler-cell-num { color: #fff; }
 .scheduler-cell.has-events .scheduler-cell-num { color: var(--ink-strong); }
 
-.scheduler-cell-dots { display: flex; gap: 2.5px; }
-.scheduler-cell-dots i {
-  width: 3.5px; height: 3.5px;
-  border-radius: 50%;
+/* ── date markers: location-pin for one item, count badge for several ──
+   color + shape carry the meaning (never color alone); markers anchor to
+   the cell corner so the day number stays readable. */
+.scheduler-cell-pin {
+  position: absolute;
+  bottom: 4px;
+  right: 6px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  border: 1px solid rgba(255, 255, 255, 0.92);
+  pointer-events: none;
+  animation: pin-pop .3s var(--ease-spring) both;
 }
-.scheduler-cell-dots i.violet { background: #a78bfa; box-shadow: 0 0 5px rgba(167,139,250,.8); }
-.scheduler-cell-dots i.blue { background: #60a5fa; box-shadow: 0 0 5px rgba(96,165,250,.8); }
-.scheduler-cell-dots i.amber { background: #fbbf24; box-shadow: 0 0 5px rgba(251,191,36,.8); }
+.scheduler-cell-pin::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #0d0a1a;
+  opacity: .75;
+  transform: translate(-50%, -50%);
+}
+.scheduler-cell-pin.violet { background: #a78bfa; box-shadow: 0 0 9px rgba(167,139,250,.95); }
+.scheduler-cell-pin.blue   { background: #60a5fa; box-shadow: 0 0 9px rgba(96,165,250,.95); }
+.scheduler-cell-pin.amber  { background: #fbbf24; box-shadow: 0 0 9px rgba(251,191,36,.9); }
+
+.scheduler-cell-pin.multi {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  transform: none;
+  border-color: rgba(255, 255, 255, 0.85);
+  display: grid;
+  place-items: center;
+  color: #0d0a1a;
+  font-size: 8.5px;
+  font-weight: 700;
+  font-family: var(--font-sans);
+  line-height: 1;
+}
+.scheduler-cell-pin.multi::after { content: none; }
+@keyframes pin-pop {
+  from { opacity: 0; scale: .25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scheduler-cell-pin { animation: none !important; }
+}
 
 /* ── selected-day schedule (lower half transforms on pick) ── */
 .scheduler-day-schedule {

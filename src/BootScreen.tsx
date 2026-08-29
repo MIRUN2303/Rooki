@@ -68,6 +68,7 @@ async function probeSTT(): Promise<{ up: boolean; stage: string }> {
 
 function speakUntilStarted(text: string): () => void {
   let stopped = false;
+  let anyStarted = false;
   const synth: SpeechSynthesis | null = "speechSynthesis" in window ? window.speechSynthesis : null;
   if (!synth) return () => {};
   synth.cancel(); // cut any prior utterance (loading splash) before boot voice
@@ -87,7 +88,7 @@ function speakUntilStarted(text: string): () => void {
     if (v) u.voice = v;
     u.rate = 1.0;
     let started = false;
-    u.onstart = () => { started = true; };
+    u.onstart = () => { started = true; anyStarted = true; };
     u.onend = u.onerror = () => { if (!stopped) cleanup(); };
     synth.resume();
     synth.speak(u);
@@ -109,7 +110,9 @@ function speakUntilStarted(text: string): () => void {
 
   return () => {
     stopped = true;
-    synth.cancel();
+    /* if the greeting already started, let it finish — cancel would cut it
+       mid-word right as boot completes and the boot screen unmounts */
+    if (!anyStarted) synth.cancel();
     synth.removeEventListener("voiceschanged", onv);
   };
 }
