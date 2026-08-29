@@ -137,7 +137,7 @@ export default function App() {
   const [result, setResult] = useState<ResearchResult | null>(null);
   const [images, setImages] = useState<ImageRef[]>([]);
   const [imagesLoading, setImagesLoading] = useState(false);
-  const [rightTab, setRightTab] = useState<"research" | "images">("research");
+  const [stackTab, setStackTab] = useState<"research" | "images" | "sched" | "map">("research");
   const [dataOpen, setDataOpen] = useState(false);
   const [chart, setChart] = useState<ChartData | null>(null);
   const [media, setMedia] = useState<MediaItem | null>(null);
@@ -300,6 +300,12 @@ export default function App() {
     window.addEventListener("rooki-map-open", onOpen);
     return () => window.removeEventListener("rooki-map-open", onOpen);
   }, []);
+
+  /* the dock follows whatever got opened last */
+  useEffect(() => {
+    if (mapOpen) setStackTab("map");
+    else if (schedOpen) setStackTab("sched");
+  }, [mapOpen, schedOpen]);
 
   /* session summary on leave — consumed once at next boot, never repeats */
   useEffect(() => {
@@ -613,7 +619,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     setResult(null);
     setImages([]);
     setImagesLoading(true);
-    setRightTab("research");
+    setStackTab("research");
     setLogs([]);
     setResearchActive(true);
     setResearchOpen(true);
@@ -659,7 +665,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     onLog(lang === "en" ? "Research complete." : "研究完成。", "done");
     /* show the Images tab immediately (the answer speaks at the same time);
        images populate asynchronously underneath */
-    setRightTab("images");
+    setStackTab("images");
     webImageSearch(loc(res.topic, lang))
       .then((imgs) => {
         if (seq !== researchSeqRef.current) return;
@@ -1435,26 +1441,55 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
         </section>
       </main>
 
-        <div className={`panel-stack${schedOpen ? " sched-mode" : ""}`}>
-        <div className="carousel-tabs">
-          <button
-            className={`carousel-tab${rightTab === "research" ? " active" : ""}`}
-            onClick={() => setRightTab("research")}
-            aria-label="Research"
-          >
-            <i className="carousel-dot" />
-            <span>Research</span>
-          </button>
-          <button
-            className={`carousel-tab${rightTab === "images" ? " active" : ""}`}
-            onClick={() => setRightTab("images")}
-            aria-label="Images"
-          >
-            <i className="carousel-dot" />
-            <span>Images</span>
-          </button>
+        <div
+          className={`panel-stack${researchOpen || schedOpen || mapOpen ? " on" : ""}`}
+          data-tab={stackTab}
+        >
+        <div className="carousel-tabs dock-tabs">
+          {researchOpen && (
+            <button
+              className={`carousel-tab${stackTab === "research" ? " active" : ""}`}
+              onClick={() => setStackTab("research")}
+              aria-label="Research"
+            >
+              <i className="carousel-dot violet" />
+              <span>Research</span>
+            </button>
+          )}
+          {researchOpen && (
+            <button
+              className={`carousel-tab${stackTab === "images" ? " active" : ""}`}
+              onClick={() => setStackTab("images")}
+              aria-label="Images"
+            >
+              <i className="carousel-dot cyan" />
+              <span>Images</span>
+            </button>
+          )}
+          {schedOpen && (
+            <button
+              className={`carousel-tab dock-tab${stackTab === "sched" ? " active" : ""}`}
+              onClick={() => setStackTab("sched")}
+              aria-label="Calendar"
+            >
+              <i className="carousel-dot amber" />
+              <span>{langRef.current === "zh" ? "日程" : "Calendar"}</span>
+            </button>
+          )}
+          {mapOpen && (
+            <button
+              className={`carousel-tab dock-tab${stackTab === "map" ? " active" : ""}`}
+              onClick={() => setStackTab("map")}
+              aria-label="Map"
+            >
+              <i className="carousel-dot red" />
+              <span>{langRef.current === "zh" ? "地图" : "Map"}</span>
+            </button>
+          )}
         </div>
-        <div className={`carousel-track${rightTab === "images" ? " slide-images" : ""}`}>
+        <div
+          className={`carousel-track${stackTab === "images" ? " slide-images" : ""}${stackTab === "research" || stackTab === "images" ? "" : " dock-off"}`}
+        >
           <div className="carousel-slide">
             <ResearchPanel
               open={researchOpen}
@@ -1484,9 +1519,9 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
             />
           </div>
         </div>
-        <SchedulerPanel open={schedOpen} onClose={() => setSchedOpen(false)} />
-        {mapOpen && <MapPanel onClose={() => setMapOpen(false)} />}
-      </div>
+        <SchedulerPanel open={schedOpen && stackTab === "sched"} onClose={() => setSchedOpen(false)} />
+          {mapOpen && <MapPanel onClose={() => setMapOpen(false)} />}
+        </div>
 
       <div className="panel-stack left">
         <DataPanel

@@ -3851,10 +3851,14 @@ button { -webkit-tap-highlight-color: transparent; }
   box-shadow: none !important;
 }
 
-/* hide entire carousel area when research is off */
-.panel-stack:not(.left):not(:has(.panel-shell.open)) {
+/* hide entire right stack when every surface is closed (dock-driven) */
+.panel-stack:not(.left):not(.on) {
   opacity: 0 !important;
   pointer-events: none !important;
+}
+.panel-stack:not(.left).on {
+  opacity: 1;
+  pointer-events: auto;
 }
 /* kill any residual borders/lines on track/slides */
 .carousel-track,
@@ -5387,12 +5391,57 @@ button { -webkit-tap-highlight-color: transparent; }
   flex: 1 1 100%;
 }
 
-/* while the calendar is active it owns the right column — carousel
-   (research/images pills + track) steps aside entirely */
-.panel-stack.sched-mode .carousel-tabs,
-.panel-stack.sched-mode .carousel-track {
+/* ════════════════════════════════════════
+   UNIFIED DOCK — the right column is a tabbed stack: exactly one surface is
+   visible at a time, the rest collapse to the pill row. No overlaps by
+   construction (matches the "don't stack fixed elements" rule).
+   ════════════════════════════════════════ */
+.panel-stack[data-tab="sched"] .carousel-track,
+.panel-stack[data-tab="map"] .carousel-track,
+.carousel-track.dock-off {
   display: none;
 }
+.panel-stack:not([data-tab="sched"]) .scheduler-panel {
+  display: none;
+}
+.panel-stack[data-tab="sched"] .scheduler-panel {
+  display: flex;
+}
+.panel-stack:not([data-tab="map"]) .map-panel {
+  display: none;
+}
+.panel-stack[data-tab="map"] .map-panel {
+  display: flex;
+  min-height: 0;
+}
+/* dock pills — each surface gets a distinct color+shape (never color alone) */
+.carousel-dot.violet { background: #a78bfa; box-shadow: 0 0 8px rgba(167, 139, 250, 0.8); }
+.carousel-dot.cyan { background: #67e8f9; box-shadow: 0 0 8px rgba(103, 232, 249, 0.8); }
+.carousel-dot.amber { background: #fbbf24; box-shadow: 0 0 9px rgba(251, 191, 36, 0.8); }
+.carousel-dot.red { background: #fb7185; box-shadow: 0 0 9px rgba(251, 113, 133, 0.8); }
+.carousel-tab.active .carousel-dot.violet { background: #a78bfa; }
+.carousel-tab.active .carousel-dot.cyan { background: #67e8f9; }
+.carousel-tab.active .carousel-dot.amber { background: #fbbf24; }
+.carousel-tab.active .carousel-dot.red { background: #fb7185; }
+/* a surface that gets switched in announces itself with a pop */
+@keyframes dockPop {
+  0% { opacity: 0; transform: scale(0.6) translateY(10px); }
+  60% { opacity: 1; transform: scale(1.05) translateY(-2px); }
+  100% { transform: scale(1) translateY(0); }
+}
+.panel-stack[data-tab="sched"] .scheduler-panel,
+.panel-stack[data-tab="map"] .map-panel {
+  animation: dockPop 0.5s var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel-stack[data-tab="sched"] .scheduler-panel,
+  .panel-stack[data-tab="map"] .map-panel {
+    animation: none !important;
+  }
+}
+.dock-tabs { padding-top: 2px; }
+
+/* (sched-mode carousel hide superseded by the dock [data-tab] rules) */
 
 /* ambient interior lighting — pointer-events none */
 .scheduler-light {
@@ -6244,7 +6293,7 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 
 /* scheduler scroll + close fixes */
-.panel-stack.sched-mode .scheduler-panel.open {
+.panel-stack[data-tab="sched"] .scheduler-panel.open {
   height: 100%;
   max-height: none;
 }
