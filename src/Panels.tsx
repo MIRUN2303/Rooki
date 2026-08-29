@@ -295,32 +295,54 @@ if (chart.kind === "bars" && chart.bars?.length) {
           <h4>{title}</h4>
           {subtitle && <p>{subtitle}</p>}
         </div>
-        <div className="chart-body chart-bars">
-          {chart.bars.map((b, i) => (
-            <div className="cbar" key={i}>
-              <span className="cbar-val">{b.value}</span>
-              <div className="cbar-track">
-                <div
-                  className="cbar-fill"
-                  style={{
-                    height: `${Math.max(2, (b.value / max) * 100)}%`,
-                    background: `linear-gradient(180deg, ${PALETTE[i % PALETTE.length]}, ${PALETTE[(i + 1) % PALETTE.length]})`,
-                    animationDelay: `${i * 90}ms`,
-                  }}
-                />
+        {chart.horizontal ? (
+          <div className="chart-body chart-bars-h">
+            {chart.bars.map((b, i) => (
+              <div className="hbar" key={i}>
+                <span className="hbar-label" title={loc(b.label, lang)}>{loc(b.label, lang)}</span>
+                <div className="hbar-track">
+                  <div
+                    className="hbar-fill"
+                    style={{
+                      width: `${Math.max(2, (b.value / max) * 100)}%`,
+                      background: `linear-gradient(90deg, ${PALETTE[i % PALETTE.length]}, ${PALETTE[(i + 1) % PALETTE.length]})`,
+                      animationDelay: `${i * 90}ms`,
+                    }}
+                  />
+                </div>
+                <span className="hbar-val">{b.value}</span>
               </div>
-              <span className="cbar-label">{loc(b.label, lang)}</span>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        ) : (
+          <div className="chart-body chart-bars">
+            {chart.bars.map((b, i) => (
+              <div className="cbar" key={i}>
+                <span className="cbar-val">{b.value}</span>
+                <div className="cbar-track">
+                  <div
+                    className="cbar-fill"
+                    style={{
+                      height: `${Math.max(2, (b.value / max) * 100)}%`,
+                      background: `linear-gradient(180deg, ${PALETTE[i % PALETTE.length]}, ${PALETTE[(i + 1) % PALETTE.length]})`,
+                      animationDelay: `${i * 90}ms`,
+                    }}
+                  />
+                </div>
+                <span className="cbar-label">{loc(b.label, lang)}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
 
   if (chart.kind === "line" && chart.points && chart.points.length > 1) {
     const pts = chart.points;
+    const labels = chart.labels?.slice(0, pts.length) ?? [];
     const max = chart.max ?? Math.max(1, ...pts);
-    const W = 300, H = 150, P = 14;
+    const W = 300, H = labels.length ? 172 : 150, P = 14;
     const X = (i: number) => P + (i / (pts.length - 1)) * (W - P * 2);
     const Y = (v: number) => H - P - (v / max) * (H - P * 2);
     const point = (i: number) => ({ x: X(i), y: Y(pts[i]) });
@@ -365,6 +387,9 @@ if (chart.kind === "bars" && chart.bars?.length) {
                 <circle cx={X(i)} cy={Y(v)} r={3.5} fill={PALETTE[i % PALETTE.length]} className="chart-dot" />
                 <text x={X(i)} y={Y(v) - 8} textAnchor="middle" className="chart-pt-label">{v}</text>
               </g>
+            ))}
+            {labels.map((lb, i) => (
+              <text key={i} x={X(i)} y={H - 4} textAnchor="middle" className="chart-x-label">{lb}</text>
             ))}
           </svg>
         </div>

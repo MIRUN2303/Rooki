@@ -54,6 +54,8 @@ export interface ToolDeps {
   performOpen: (kind: "youtube" | "music", query: string, lang: "en" | "zh") => { query: string; kind: "video" | "music" };
   startResearch: (raw: string, lang: "en" | "zh", followUp: boolean, silent: boolean, mode?: ResearchMode) => Promise<ResearchResult | null>;
   stopAll: (lang: "en" | "zh") => void;
+  /** called after every tool execution (fast path + pipeline + research) */
+  onTool?: (name: string, res: ToolResult) => void;
 }
 
 export interface ToolResult {
@@ -220,6 +222,66 @@ export async function youtubeVideoSearch(q: string): Promise<MediaTrack | null> 
   } catch {
     return null;
   }
+}
+
+/* ---- pure chart series helpers (selfchecked in tests/selfcheck.ts) ---- */
+export type ChartSeries = { label: string; value: number }[];
+export function normalizeChartSeries(input: unknown): ChartSeries | null {
+  if (!input || typeof input !== "object") return null;
+  const it = input as { labels?: unknown; values?: unknown };
+  if (!Array.isArray(it.labels) || !Array.isArray(it.values)) return null;
+  const labels: unknown[] = it.labels;
+  const values: unknown[] = it.values;
+  const pairs = labels
+    .map((l, i) => ({ label: String(l ?? "").trim(), value: Number(values[i]) }))
+    .filter((p) => p.label && isFinite(p.value));
+  return pairs.length >= 2 ? pairs.slice(0, 8) : null;
+}
+export function donutPercent(values: number[]): number[] {
+  const raw = values.map((v) => Math.max(0, v));
+  const total = raw.reduce((s, v) => s + v, 0) || 1;
+  const pct = raw.map((v) => (v / total) * 100);
+  const ints = pct.map(Math.floor);
+  let leftover = 100 - ints.reduce((s, v) => s + v, 0);
+  const order = pct
+    .map((p, i) => i)
+    .sort((a, b) => pct[b] - Math.floor(pct[b]) - (pct[a] - Math.floor(pct[a])) || b - a);
+  for (let i = 0; i < leftover; i++) ints[order[i % order.length]]++;
+  return ints;
+}
+
+/* how many real data numbers are in this text? years don't count. gates whether
+   chart.build can skip research and use the user's own numbers. */
+export function dataNumberCount(text: string): number {
+  const m = text.match(/\d+(?:\.\d+)?%?/g) ?? [];
+  return m.filter((n) => {
+    const v = parseFloat(n.replace(/[,%]/g, ""));
+    return !(Number.isInteger(v) && v >= 1900 && v <= 2099);
+  }).length;
+}
+
+/* what the user asked for that changes the chart's design (not its data) */
+export function chartRequestIntent(text: string): { percent: boolean; pie: boolean; horizontal: boolean } {
+  return {
+    percent: /(percent|percentage|占比|比例|百分比|份额)/i.test(text),
+    pie: /(\bpie\b|\bdonut\b|饼图|环形图)/i.test(text),
+    horizontal: /(horizontal|横向|横条|横图)|\brank(ing|ed)?\b|排序|排行/i.test(text),
+  };
+}
+
+/* follow-up wording that refers to the last chart instead of a new subject:
+   "show that as a chart", "make it a bar chart", "change it to a line graph",
+   "chart that". fresh subjects stay unquoted so they fall through to research. */
+export function isChartReference(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (t.length > 40) return false;
+  return /\b(it|that|this)\b/i.test(t) || /(change|switch|turn|redraw|instead|改成|变成|换成|改为|用)/i.test(t);
+}
+
+export type LastChart = { topic: string; title: string; pairs: ChartSeries };
+let lastChart: LastChart | null = null;
+export function getLastChart(): LastChart | null {
+  return lastChart;
 }
 
 const TOOLS: ToolDef[] = [
@@ -575,9 +637,18 @@ const TOOLS: ToolDef[] = [
     name: "map.locate",
     desc: "locate/show a place on the map: args {query: 'Eiffel Tower'} — use for 'where is X', 'locate X', 'show X on the map', 'directions to X', or any discussion about a place. Opens the map panel with markers, images and info.",
     permission: "auto",
-    run: async (args) => {
+    run: async (args, deps) => {
       const query = String(args.query ?? "").trim();
       if (!query) return { ok: false, error: "query required", unsupported: true };
+      // research-first: understand the place (esp. with messy transcription) and
+      // collect a short summary before locating the exact spot
+      let researchSummary = "";
+      try {
+        if (deps?.startResearch) {
+          const r = await deps.startResearch(query, (deps.lang ?? "en") as "en" | "zh", false, true);
+          if (r) researchSummary = ((r.answer as any)?.en || (r.answer as any)?.zh || "").slice(0, 260);
+        }
+      } catch {}
       const { searchLocation, getDeviceLocation } = await import("./location");
       const res = await searchLocation(query);
       if (!res.length) return { ok: false, error: `couldn't find a place for "${query}"`, unsupported: true };
@@ -600,13 +671,126 @@ const TOOLS: ToolDef[] = [
         confidence: "0.8",
       });
       if (places.length === 1) {
-        return { ok: true, verified: true, data: { query, places }, summary: `located ${places[0].name} on the map (${places[0].latitude.toFixed(3)}, ${places[0].longitude.toFixed(3)})` };
+        return { ok: true, verified: true, data: { query, places }, summary: `located ${places[0].name} on the map (${places[0].latitude.toFixed(3)}, ${places[0].longitude.toFixed(3)})${researchSummary ? " — " + researchSummary : ""}` };
       }
       return {
         ok: true,
         verified: true,
         data: { query, places },
-        summary: `found ${places.length} possible matches for "${query}": ${places.map((p) => p.name).join(" | ")}. Showed all on the map — briefly ask which one they mean ("did you mean A or B?").`,
+        summary: `found ${places.length} possible matches for "${query}": ${places.map((p) => p.name).join(" | ")}. Showed all on the map — briefly ask which one they mean ("did you mean A or B?")${researchSummary ? " — " + researchSummary : ""}.`,
+      };
+    },
+    render: (d) => JSON.stringify(d),
+  },
+  {
+    name: "location.manage",
+    desc: "single entry to the location layer: args {action:'locate'|'search'|'nearby'|'route'|'distance', query, origin?, mode?}. locate: research-before-geocode, resolve ONE exact place and open the map. search: list candidate places for a fuzzy query (messy transcription). nearby: places matching the query near the user. route: open the map with a road route + ETA to the query place. distance: road distance between origin and the query place. origin defaults to the saved/device location; mode: driving|walking|cycling. Returns structured JSON only — never fabricate places, roads, or times; when multiple matches exist, DO NOT guess — pick none and ask the user.",
+    permission: "auto",
+    run: async (args) => {
+      const { suggest, resolvePlace, route, distance } = await import("./locationIntel");
+      const { getDeviceLocation } = await import("./location");
+      const action = String(args.action ?? "locate");
+      const query = String(args.query ?? "").trim();
+      const mode = (["driving", "walking", "cycling"].includes(String(args.mode)) ? String(args.mode) : "driving") as "driving" | "walking" | "cycling";
+      if (!query) return { ok: false, error: "query required", unsupported: true };
+      const originLabel = String(args.origin ?? "").trim();
+
+      const resolveOrigin = async (): Promise<{ latitude: number; longitude: number; name?: string } | null> => {
+        if (originLabel) {
+          const o = await resolvePlace(originLabel);
+          if (o) return { latitude: o.latitude, longitude: o.longitude, name: o.name };
+        }
+        try {
+          const { getCurrentLocation } = await import("./weather");
+          const loc = await getCurrentLocation();
+          if (loc?.latitude) return { latitude: loc.latitude, longitude: loc.longitude, name: loc.name };
+        } catch {}
+        try {
+          const pos = await getDeviceLocation();
+          return { latitude: pos.latitude, longitude: pos.longitude, name: "your location" };
+        } catch {}
+        return null;
+      };
+
+      const toHit = (p: { name: string; city: string; state: string; country: string; latitude: number; longitude: number }) => ({
+        name: p.name, city: p.city, region: p.state || p.city, country: p.country,
+        latitude: p.latitude, longitude: p.longitude,
+      });
+
+      if (action === "route" || action === "distance") {
+        const dest = await resolvePlace(query);
+        if (!dest) return { ok: false, error: `couldn't resolve "${query}"`, unsupported: true };
+        const origin = await resolveOrigin();
+        if (!origin) return { ok: false, error: "no starting point — say where to start from", unsupported: true };
+        const a = { latitude: origin.latitude, longitude: origin.longitude };
+        const b = { latitude: dest.latitude, longitude: dest.longitude };
+        const dist = await distance(a, b, mode);
+        const rt = await route(a, b, mode);
+        const data = {
+          from: a, to: { ...b, name: dest.name },
+          mode,
+          straightLineKm: +(dist.straightLineMeters / 1000).toFixed(1),
+          roadKm: rt ? +(rt.distanceMeters / 1000).toFixed(1) : undefined,
+          etaMinutes: rt ? Math.round(rt.durationSeconds / 60) : undefined,
+        };
+        if (action === "distance") {
+          const km = (rt ? rt.distanceMeters : dist.straightLineMeters) / 1000;
+          return { ok: true, verified: true, data, summary: `${dest.name} is ${km.toFixed(1)} km${rt ? ` by ${mode} — about ${Math.round(rt.durationSeconds / 60)} min` : " away (straight line)"}` };
+        }
+        if (!rt) return { ok: true, data, summary: `couldn't get road directions to ${dest.name} — straight line only` };
+        window.dispatchEvent(new CustomEvent("rooki-map-route", {
+          detail: {
+            origin: a,
+            destination: { latitude: dest.latitude, longitude: dest.longitude, name: dest.name },
+            geometry: rt.geometry,
+            bounds: rt.bounds,
+            distanceMeters: rt.distanceMeters,
+            durationSeconds: rt.durationSeconds,
+            steps: rt.steps,
+            mode,
+          },
+        }));
+        window.dispatchEvent(new CustomEvent("rooki-map-open"));
+        return { ok: true, verified: true, data, summary: `route to ${dest.name}: ${(rt.distanceMeters / 1000).toFixed(1)} km, about ${Math.round(rt.durationSeconds / 60)} min by ${mode}` };
+      }
+
+      /* locate / search / nearby share candidate resolution */
+      const places = await suggest(query);
+      if (!places.length) return { ok: false, error: `couldn't find a place for "${query}"`, unsupported: true };
+      const hits = places.slice(0, 5).map(toHit);
+
+      if (action === "nearby") {
+        const origin = await resolveOrigin();
+        if (!origin) return { ok: true, data: { places: hits }, summary: `found ${hits.length} matches — saying where to look from would narrow it down` };
+        const withDist = hits
+          .map((h) => {
+            const km = Math.hypot(h.latitude - origin.latitude, h.longitude - origin.longitude) * 111;
+            return { ...h, distanceKm: +km.toFixed(1) };
+          })
+          .sort((a, b) => a.distanceKm - b.distanceKm);
+        window.dispatchEvent(new CustomEvent("rooki-map-locate", { detail: { query, results: withDist, origin } }));
+        window.dispatchEvent(new CustomEvent("rooki-map-open"));
+        return { ok: true, verified: true, data: { near: origin, places: withDist }, summary: `nearest match: ${withDist[0].name} — ${withDist[0].distanceKm} km` };
+      }
+
+      window.dispatchEvent(new CustomEvent("rooki-map-locate", { detail: { query, results: hits, origin: null } }));
+      window.dispatchEvent(new CustomEvent("rooki-map-open"));
+      upsertMemory("fact", `Asked about place: ${places[0].name}`, {
+        memoryType: "permanent",
+        category: "location",
+        key: `place_${query.toLowerCase().replace(/\s+/g, "_").slice(0, 40)}`,
+        source: "inferred",
+        confidence: "0.8",
+      });
+
+      if (places.length === 1 && places[0].confidence >= 0.25) {
+        return { ok: true, verified: true, data: { query, places: hits }, summary: `located ${places[0].name} on the map (${places[0].latitude.toFixed(3)}, ${places[0].longitude.toFixed(3)})` };
+      }
+      return {
+        ok: true,
+        verified: false,
+        data: { query, places: hits },
+        summary: `found several possible matches for "${query}" and showed them on the map: ${hits.map((p) => p.name).join(" | ")}. Ask the user which one they mean — do NOT guess.`,
       };
     },
     render: (d) => JSON.stringify(d),
@@ -875,22 +1059,27 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "chart.build",
-    desc: "build an animated chart from researched data — args {topic, kind: 'donut'|'bars'|'line'} (donut for pie/percentage breakdowns)",
+    desc: "build an animated chart — args {topic, kind: 'donut'|'bars'|'line'} (donut=percentage breakdown, bars=comparison/ranking, line=trend). Works from data the user typed, from the last research, or restyles the previous chart on follow-ups (\"make it a bar chart\", \"chart that\").",
     permission: "auto",
     run: async (args, deps) => {
       const topic = String(args.topic ?? "").trim();
       if (!topic) return { ok: false, error: "no topic", unsupported: true };
-      const k = String(args.kind ?? "donut").toLowerCase();
+      const k = String(args.kind ?? "").toLowerCase();
       const kind = k === "line" ? "line" : k === "bars" || k === "bar" ? "bars" : "donut";
+      const userText = String(deps.userText ?? "");
+      const intent = chartRequestIntent(userText);
       type SubRes = { topic: string | { en: string; zh: string }; answer: string | { en: string; zh: string }; sources: { name: string; url?: string }[] };
       const subText = (v: string | { en: string; zh: string }) => (typeof v === "string" ? v : v.en);
+      const mk = (s: string, z = s) => ({ en: s, zh: z });
+      const hasInline = dataNumberCount(userText) >= 2;
       let res: SubRes | null = lastResearchResult() ?? null;
-      if (!res || !topic.toLowerCase().includes(subText(res.topic).toLowerCase().slice(0, 24))) {
-        res = await deps.startResearch(topic, deps.lang, false, true);
-      }
-      if (!res) return { ok: false, error: "could not research topic", unsupported: true };
-      const report = `${subText(res.answer)}\n\nSources: ${res.sources.map((s) => s.name).join(", ")}`;
-      const ask = `You extract data for a chart from a research report. Use the user's message and the report.
+      const resMatches = !!res && topic.toLowerCase().includes(subText(res.topic).toLowerCase().slice(0, 24));
+
+      let pairs: ChartSeries | null = null;
+      let chartTitle = "";
+      let from = "research";
+      const extractFromReport = async (report: string): Promise<{ pairs: ChartSeries; title: string } | null> => {
+        const ask = `You extract data for a chart from a research report. Use the user's message and the report.
 Return JSON: {"title":"short chart title","kind":"donut|bars|line","labels":["A","B","C"],"values":[60,25,15]}
 - 2 to 8 items — NEVER a single data point. A chart with one slice at 100% is wrong.
 - If the report gives a total, SPLIT it into the real sub-parts present in the report (years, urban/rural, age groups, districts, religion, literacy, regions...). Only use facts the report actually contains.
@@ -898,54 +1087,87 @@ Return JSON: {"title":"short chart title","kind":"donut|bars|line","labels":["A"
 - kind: donut for percentage/breakdown, bars for comparisons, line for trends over time
 - match the requested chart kind (${kind}) unless the data clearly needs another
 - if the user gave specific numbers, chart THOSE numbers exactly`;
-      const run = async (hint: string) =>
-        llmJson<{ title: string; kind: "donut" | "bars" | "line"; labels: string[]; values: number[] }>(
-          deps.settings,
-          ask + hint,
-          `User: ${truncate(deps.userText, 800)}
+        const run = async (hint: string) =>
+          llmJson<{ title: string; kind: "donut" | "bars" | "line"; labels: string[]; values: number[] }>(
+            deps.settings,
+            ask + hint,
+            `User: ${truncate(userText, 800)}
 Report: ${truncate(report, 5000)}`,
+            { purpose: "chart", maxTokens: 400, temperature: 0.2 }
+          );
+        let chart = await run("");
+        const toPairs = () => normalizeChartSeries(chart);
+        if (!toPairs()) {
+          chart = await run(
+            "\nYour chart had fewer than 2 usable items. Split the data into at least 2 parts using the real facts in the report (years, urban/rural, regions, categories)."
+          );
+        }
+        const got = toPairs();
+        return got && chart ? { pairs: got, title: chart.title || topic } : null;
+      };
+      if (resMatches && res) {
+        const got = await extractFromReport(`${subText(res.answer)}\n\nSources: ${res.sources.map((s) => s.name).join(", ")}`);
+        if (got) {
+          pairs = got.pairs;
+          chartTitle = got.title;
+        }
+      } else if (hasInline) {
+        const ask = `The user gave the data themselves. Extract it into a chart series.
+Return JSON: {"title":"short chart title","kind":"donut|bars|line","labels":["A","B","C"],"values":[60,25,15]}
+- 2 to 8 items, in the user's given order. Use ONLY numbers the user typed — never invent values.
+- kind: donut for percentage/breakdown, bars for comparisons, line for trends over time
+- match the requested chart kind (${kind}) unless the data clearly needs another`;
+        const chart = await llmJson<{ title: string; kind: "donut" | "bars" | "line"; labels: string[]; values: number[] }>(
+          deps.settings,
+          ask,
+          `User message: ${truncate(userText, 800)}`,
           { purpose: "chart", maxTokens: 400, temperature: 0.2 }
         );
-      let chart = await run("");
-      if (
-        chart &&
-        Array.isArray(chart.labels) &&
-        Array.isArray(chart.values) &&
-        chart.labels.length < 2
-      ) {
-        chart = await run(
-          "\nYour chart had fewer than 2 items. Split the data into at least 2 parts using the real facts in the report (years, urban/rural, regions, categories)."
-        );
+        const got = normalizeChartSeries(chart);
+        if (got) {
+          pairs = got;
+          chartTitle = chart?.title || topic;
+          from = "inline";
+        }
+      } else if (lastChart && isChartReference(topic)) {
+        pairs = lastChart.pairs;
+        chartTitle = lastChart.title;
+        from = "reuse";
+      } else {
+        res = await deps.startResearch(topic, deps.lang, false, true);
+        if (!res) return { ok: false, error: "could not research topic", unsupported: true };
+        const got = await extractFromReport(`${subText(res.answer)}\n\nSources: ${res.sources.map((s) => s.name).join(", ")}`);
+        if (!got) return { ok: false, error: "could not analyze data", unsupported: true };
+        pairs = got.pairs;
+        chartTitle = got.title;
       }
-      if (!chart) return { ok: false, error: "could not analyze data", unsupported: true };
-      const labels = Array.isArray(chart.labels) ? chart.labels.map(String).slice(0, 8) : [];
-      const values = Array.isArray(chart.values) ? chart.values.map(Number).filter((n) => isFinite(n) && n > 0).slice(0, 8) : [];
-      if (!labels.length || !values.length || labels.length < 2) return { ok: false, error: "report has no breakdown data to split", unsupported: true };
-      const kindOut = chart.kind === "line" ? "line" : chart.kind === "bars" ? "bars" : "donut";
-      const mk = (s: string) => ({ en: s, zh: s });
-      const max = Math.max(...values, 1);
-      const donutVals = labels.map((l, i) => ({ label: mk(l), value: Number(values[i]) || 0 }));
-      const total = donutVals.reduce((s, d) => s + d.value, 0) || 1;
-      const pcts = donutVals.map((d) => (d.value / total) * 100);
-      const ints = pcts.map(Math.floor);
-      let leftover = 100 - ints.reduce((s, v) => s + v, 0);
-      const order = pcts.map((p, i) => i).sort((a, b) => (pcts[b] % 1) - (pcts[a] % 1) || b - a);
-      for (let i = 0; i < leftover; i++) ints[order[i]]++;
+
+      if (!pairs) return { ok: false, error: "could not analyze data", unsupported: true };
+      const raw = pairs.map((p) => p.value);
+      let kindOut = kind;
+      /* data-first: donut only for a few slices, unless the user asked for one */
+      if (kindOut === "donut" && pairs.length > 4 && !intent.percent && !intent.pie) kindOut = "bars";
+      const ints = donutPercent(raw);
       const data = {
         kind: kindOut,
-        title: mk(chart.title || topic),
-        subtitle: {
-          en: `Based on ${res.sources.length} researched source${res.sources.length === 1 ? "" : "s"}`,
-          zh: `基于 ${res.sources.length} 个研究来源`,
-        },
-        max: kindOut === "donut" ? 100 : max,
+        title: mk(chartTitle || topic),
+        subtitle:
+          from === "inline"
+            ? mk("From the numbers you gave", "根据你提供的数据")
+            : from === "reuse"
+              ? mk("Same data — restyled to your request", "同一组数据，按你的要求换了个样式")
+              : mk(`Based on ${res!.sources.length} researched source${res!.sources.length === 1 ? "" : "s"}`, `基于 ${res!.sources.length} 个研究来源`),
+        max: kindOut === "donut" ? 100 : Math.max(...raw, 1),
+        labels: pairs.map((p) => p.label),
+        horizontal: kindOut === "bars" && intent.horizontal,
         ...(kindOut === "donut"
-          ? { donut: donutVals.map((d, i) => ({ label: d.label, value: ints[i] })) }
+          ? { donut: pairs.map((p, i) => ({ label: mk(p.label), value: ints[i] })) }
           : kindOut === "bars"
-            ? { bars: labels.map((l, i) => ({ label: mk(l), value: Math.round(values[i] ?? 0) })) }
-            : { points: values }),
+            ? { bars: pairs.map((p) => ({ label: mk(p.label), value: p.value })) }
+            : { points: raw }),
       };
-      return { ok: true, data, verified: true, summary: `chart of "${topic}" (${labels.length} data points)` };
+      lastChart = { topic, title: chartTitle || topic, pairs };
+      return { ok: true, data, verified: true, summary: `chart of "${topic}" (${pairs.length} data points)` };
     },
     render: (d) => {
       const r = d as { kind: string; title: { en: string }; donut?: unknown[]; bars?: unknown[]; points?: number[] };
@@ -1025,6 +1247,7 @@ const schedTools: ToolDef[] = [
         from = f.getTime(); to = t2.getTime();
       }
       const items = listTasks({ status: scope === "all" ? undefined : ["scheduled", "snoozed"], from, to });
+      window.dispatchEvent(new CustomEvent("rooki-scheduler-open", { detail: { view: "list" } }));
       return {
         ok: true,
         data: items.map((t) => ({ id: t.id, title: t.title, when: t.nextRunAt, trigger: describeTrigger(t.trigger), status: t.status })),
@@ -1287,6 +1510,7 @@ export async function executeTool(
     res = { ok: false, error: String(e) };
   }
   res.ms = Math.round(performance.now() - t0);
+  deps.onTool?.(t.name, res);
   if (res.ok && res.data !== undefined) {
     try {
       res.summary = t.render(res.data);

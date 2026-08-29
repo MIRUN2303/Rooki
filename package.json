@@ -5,10 +5,10 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k -n VITE,STT -c green,cyan \"vite\" \"C:\\Users\\mirun\\AppData\\Local\\Programs\\Python\\Python313\\python.exe stt_server.py\"",
+    "dev": "concurrently -k -n VITE,STT -c green,cyan \"vite\" \"tools\\venv\\Scripts\\python.exe stt_server.py\"",
     "dev:vite": "vite",
-    "dev:stt": "C:\\Users\\mirun\\AppData\\Local\\Programs\\Python\\Python313\\python.exe stt_server.py",
-    "dev:desktop": "ROOKI_DEV=1 concurrently -k -n VITE,STT,AGENT,ELECTRON -c green,cyan,yellow,magenta \"vite\" \"C:\\Users\\mirun\\AppData\\Local\\Programs\\Python\\Python313\\python.exe stt_server.py\" \"node tools/agent/server.mjs\" \"electron .\"",
+    "dev:stt": "tools\\venv\\Scripts\\python.exe stt_server.py",
+    "dev:desktop": "ROOKI_DEV=1 concurrently -k -n VITE,STT,AGENT,ELECTRON -c green,cyan,yellow,magenta \"vite\" \"tools\\venv\\Scripts\\python.exe stt_server.py\" \"node tools/agent/server.mjs\" \"electron .\"",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "selfcheck": "vite build --config vite.selfcheck.ts && node dist-selfcheck/selfcheck.js",
@@ -42,7 +42,6 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "tools/kokoro_tts.py",
       "tools/venv/**/*",
       "stt_server.py",
       "tools/agent/**/*",

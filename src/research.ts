@@ -26,6 +26,7 @@ export interface ResearchSource extends SourceRef {
   domain: string;
   excerpt: string;
   crawled?: boolean;
+  published?: string; // ISO date when available (news feeds)
 }
 
 export interface ImageRef {
@@ -136,6 +137,55 @@ export async function webSearch(query: string): Promise<ResearchSource[]> {
     clearTimeout(t);
     throw e;
   }
+}
+
+/* Fresh news via Google News RSS (keyless, CORS-friendly through /gnews).
+   `when` filters by recency: "1d" = last day, "30d" = last month, "" = all.
+   Returns sources sorted newest-first with the real publish date attached. */
+export async function webNewsSearch(query: string, when: string): Promise<ResearchSource[]> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const q = encodeURIComponent(when ? `${query} when:${when}` : query);
+    const r = await fetch(`/gnews/rss/search?q=${q}&hl=en-US&gl=US&ceid=US:en&num=50`, {
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (!r.ok) throw new Error(`gnews status ${r.status}`);
+    const xml = await r.text();
+    const doc = new DOMParser().parseFromString(xml, "text/xml");
+    const out: ResearchSource[] = [];
+    doc.querySelectorAll("item").forEach((el) => {
+      const title = el.querySelector("title")?.textContent?.trim() ?? "";
+      const link = el.querySelector("link")?.textContent?.trim() ?? "";
+      const pub = el.querySelector("pubDate")?.textContent?.trim() ?? "";
+      const desc = el.querySelector("description")?.textContent?.trim() ?? "";
+      const srcEl = el.querySelector("source");
+      const srcUrl = srcEl?.getAttribute("url") ?? "";
+      if (!title || !link) return;
+      const domain = (srcUrl ? new URL(srcUrl).hostname : new URL(link).hostname).replace(/^www\./, "");
+      out.push({
+        name: title,
+        url: link,
+        domain,
+        kind: bi("news", "新闻"),
+        excerpt: desc.replace(/<[^>]+>/g, "").slice(0, 300),
+        time: now(),
+        published: pub ? new Date(pub).toISOString() : undefined,
+      });
+    });
+    return out.sort((a, b) => (b.published ?? "").localeCompare(a.published ?? ""));
+  } catch (e) {
+    clearTimeout(t);
+    throw e;
+  }
+}
+
+/* news intent: "latest news today", headlines, breaking, trends, 新闻, 头条… */
+export function isNewsIntent(text: string): boolean {
+  const t = text.toLowerCase();
+  if (/\b(history|archive|archived|回顾|历史上|旧闻|档案|old news|years? ago)\b/.test(t)) return false;
+  return /\b(news|headlines?|breaking|latest|trending|top stories|what'?s new|今日|今天|最新|新闻|头条|时事|热点|动态)\b|新闻|头条|时事/.test(t);
 }
 
 /* crawl a page with Playwright through the local agent bridge — real
@@ -382,6 +432,29 @@ export async function researchTopic(ctx: ResearchCtx): Promise<ResearchResult | 
     if (!isCurrent()) return null;
     onLog(lang === "en" ? `Searching (${mode}): "${topic}"` : `正在搜索（${mode}）：「${topic}」`);
     const queries = buildSearchQueries(topic, mode, lang, compareItems);
+
+    /* fresh news: pull from many sites, newest-first, when the question is
+       news-shaped. By default only recent items; "history/旧闻" → no date
+       filter (old news only on explicit command). */
+    const wantNews = mode === "news" || isNewsIntent(text) || isNewsIntent(topic);
+    const oldNews = /\b(history|archive|archived|回顾|历史上|旧闻|档案|old news|years? ago)\b/.test(
+      `${text} ${topic}`.toLowerCase()
+    );
+    if (wantNews && !followUp) {
+      const when = oldNews ? "" : lang === "zh" ? "3d" : "1d";
+      const newsQs = Array.from(new Set([topic, queries[0]]));
+      for (const nq of newsQs) {
+        if (!isCurrent()) return null;
+        try {
+          const nres = await webNewsSearch(nq, when);
+          sources = sources.concat(nres);
+          onLog(lang === "en" ? `Fresh news: ${nres.length} source(s)` : `最新新闻：${nres.length} 个来源`);
+        } catch {
+          onLog(lang === "en" ? "News feed unavailable" : "新闻源不可用", "error");
+        }
+      }
+    }
+
     for (const q of queries) {
       if (!isCurrent()) return null;
       try {
@@ -407,8 +480,11 @@ export async function researchTopic(ctx: ResearchCtx): Promise<ResearchResult | 
         if (seen.has(k)) return false;
         seen.add(k);
         return true;
-      })
-      .slice(0, 8);
+      });
+    if (wantNews) {
+      sources.sort((a, b) => (b.published ?? "").localeCompare(a.published ?? ""));
+    }
+    sources = sources.slice(0, wantNews ? 12 : 8);
 
     if (!sources.length) {
       onLog(lang === "en" ? "No usable results from the search service." : "搜索服务未返回可用结果。", "error");

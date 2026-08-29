@@ -131,36 +131,40 @@
         <span class="check">✓</span>
         <span>Agent Bridge</span>
       </div>
-      <div class="service-item" id="svc-tts">
+      <div class="service-item" id="svc-tts ready">
         <span class="check">✓</span>
-        <span>Kokoro TTS</span>
+        <span>Voice Out (native)</span>
       </div>
       <div class="service-item" id="svc-ui">
         <span class="check">✓</span>
         <span>Interface</span>
       </div>
     </div>
+    <a href="http://localhost:5173" id="cta" style="display:none; margin-top:18px; padding:10px 22px; font-size:12px; letter-spacing:2px; color:#0a0a0f; background:#a78bfa; border-radius:999px; text-decoration:none; font-weight:600;">ENTER INTERFACE</a>
   </div>
   <script>
     const statusEl = document.getElementById('status');
     const progressEl = document.getElementById('progress');
     const spinnerEl = document.getElementById('spinner');
-    
+    const ctaEl = document.getElementById('cta');
+
+    /* TTS had no server of its own — voice out is the browser's native Web
+       Speech API, always present. Only the services that actually exist gate
+       the handoff: STT must be up, the UI must be serving. */
     const services = {
-      stt: { port: 8765, path: '/health', ready: false },
-      agent: { port: 8766, path: '/ping', ready: false },
-      tts: { port: 8767, path: '/health', ready: false },
-      ui: { port: 5173, path: '/', ready: false }
+      stt: { port: 8765, path: '/health', ready: false, required: true },
+      agent: { port: 8766, path: '/ping', ready: false, required: false },
+      ui: { port: 5173, path: '/', ready: false, required: true }
     };
-    
+
     let totalReady = 0;
     const totalServices = Object.keys(services).length;
-    
+
     function updateProgress() {
       const pct = Math.round((totalReady / totalServices) * 100);
       progressEl.style.width = pct + '%';
     }
-    
+
     function markReady(name) {
       const el = document.getElementById('svc-' + name);
       if (el) el.classList.add('ready');
@@ -170,12 +174,12 @@
         updateProgress();
       }
     }
-    
+
     function markError(name) {
       const el = document.getElementById('svc-' + name);
       if (el) el.classList.add('error');
     }
-    
+
     async function checkService(name) {
       const svc = services[name];
       try {
@@ -191,55 +195,54 @@
         return false;
       }
     }
-    
+
+    function allRequiredReady() {
+      return Object.keys(services).every((n) => !services[n].required || services[n].ready);
+    }
+
+    function enterInterface() {
+      statusEl.textContent = 'ROOKI is ready!';
+      spinnerEl.style.display = 'none';
+      updateProgress();
+      setTimeout(() => {
+        window.location.href = 'http://localhost:5173';
+      }, 500);
+    }
+
     async function pollServices() {
       const checks = Object.keys(services).map(async (name) => {
         const ok = await checkService(name);
-        if (ok) {
-          markReady(name);
-          return true;
-        }
-        return false;
+        if (ok) markReady(name);
+        else markError(name);
       });
-      
+
       await Promise.all(checks);
-      
-      if (totalReady >= totalServices) {
-        statusEl.textContent = 'ROOKI is ready!';
-        spinnerEl.style.display = 'none';
-        updateProgress();
-        // Redirect to main UI
-        setTimeout(() => {
-          window.location.href = 'http://localhost:5173';
-        }, 800);
-      } else {
-        // Continue polling
-        setTimeout(pollServices, 1000);
+
+      if (allRequiredReady()) {
+        enterInterface();
+      } else if (ctaEl) {
+        ctaEl.style.display = 'inline-block';
+        // Continue checking in the background — a late service flips the gate
+        setTimeout(pollServices, 1500);
       }
     }
-    
-    // Check if UI is already ready (fast path)
-    async function fastCheck() {
-      const ok = await checkService('ui');
-      if (ok) {
-        markReady('ui');
-        statusEl.textContent = 'Interface ready, checking services...';
-      }
-    }
-    
+
     // Start
-    fastCheck().then(() => {
-      pollServices();
-    });
-    
+    pollServices();
+
+    // Never leave the user staring: after a few seconds an explicit escape
+    // hatch appears — typed input always works even with STT down.
+    setTimeout(() => {
+      if (!ctaEl) return;
+      ctaEl.style.display = 'inline-block';
+    }, 15000);
+
     // Update status messages based on what's ready
     setInterval(() => {
       if (!services.stt.ready) {
         statusEl.textContent = 'Loading Parakeet STT model...';
       } else if (!services.agent.ready) {
         statusEl.textContent = 'Starting Agent bridge...';
-      } else if (!services.tts.ready) {
-        statusEl.textContent = 'Initializing Kokoro TTS...';
       } else if (!services.ui.ready) {
         statusEl.textContent = 'Starting interface...';
       }

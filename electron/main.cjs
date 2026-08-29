@@ -10,7 +10,7 @@
  * - Clean shutdown
  */
 
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require("electron");
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -71,6 +71,8 @@ if (app.isReady()) {
 // ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------
+// Let the renderer play audio (boot voice, speech) without a user gesture.
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 app.whenReady().then(() => {
   if (IS_DEV) {
     // boot vite first so the very first load lands on the BootScreen
@@ -103,6 +105,8 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      /* keep voice / queued-speech / scheduler timers alive while hidden */
+      backgroundThrottling: false,
     },
     show: false,
     backgroundColor: "#0a0a0f",
@@ -219,6 +223,10 @@ function createTray() {
       label: "Show ROOKI",
       click: () => mainWindow && mainWindow.show(),
     },
+    {
+      label: "Floating mode",
+      click: () => setMode("floating"),
+    },
     { type: "separator" },
     {
       label: "Quit",
@@ -231,11 +239,188 @@ function createTray() {
 
   tray.setContextMenu(contextMenu);
   tray.on("click", () => {
-    if (mainWindow) {
-      mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
-    }
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
   });
 }
+// ---------------------------------------------------------------------------
+// Floating mini mode — a small always-on-top transparent surface.
+// Same brain, extra presentation: shows the current exchange, fades after a
+// few seconds, leaves the icon. Position/size/opacity persist in userData.
+// ---------------------------------------------------------------------------
+const FLOATER_W = 380;
+const FLOATER_H = 250;
+let floaterWin = null;
+let currentMode = "full";
+
+function floaterSettingsPath() {
+  return path.join(app.getPath("userData"), "floater.json");
+}
+function defaultFloaterSettings() {
+  return { opacity: 0.7, size: 48, convOpacity: 0.92, fadeMs: 5000, pos: null };
+}
+function loadFloaterSettings() {
+  try {
+    return { ...defaultFloaterSettings(), ...JSON.parse(fs.readFileSync(floaterSettingsPath(), "utf8")) };
+  } catch {
+    return defaultFloaterSettings();
+  }
+}
+function saveFloaterSettings(patch) {
+  const s = { ...loadFloaterSettings(), ...patch };
+  try {
+    fs.writeFileSync(floaterSettingsPath(), JSON.stringify(s, null, 2));
+  } catch {}
+  return s;
+}
+function clampPos(pos) {
+  if (!pos || typeof pos.x !== "number" || typeof pos.y !== "number") {
+    const wa = screen.getPrimaryDisplay().workArea;
+    return { x: wa.x + wa.width - FLOATER_W - 16, y: wa.y + wa.height - FLOATER_H - 16 };
+  }
+  const d = screen.getDisplayNearestPoint({ x: Math.round(pos.x), y: Math.round(pos.y) });
+  const wa = d.workArea;
+  return {
+    x: Math.min(Math.max(pos.x, wa.x), wa.x + wa.width - FLOATER_W),
+    y: Math.min(Math.max(pos.y, wa.y), wa.y + wa.height - FLOATER_H),
+  };
+}
+
+function createFloater() {
+  if (floaterWin && !floaterWin.isDestroyed()) return floaterWin;
+  const s = loadFloaterSettings();
+  const pos = clampPos(s.pos);
+  floaterWin = new BrowserWindow({
+    x: pos.x,
+    y: pos.y,
+    width: FLOATER_W,
+    height: FLOATER_H,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: true,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    focusable: true,
+    show: false,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      preload: path.join(__dirname, "floater-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+    },
+  });
+  floaterWin.setAlwaysOnTop(true, "screen-saver");
+  floaterWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  floaterWin.loadFile(path.join(__dirname, "floater.html"));
+  floaterWin.webContents.on("did-finish-load", () => {
+    floaterWin.webContents.send("rooki:settings", loadFloaterSettings());
+  });
+  /* persist position (debounced) */
+  let posTimer = null;
+  floaterWin.on("move", () => {
+    clearTimeout(posTimer);
+    posTimer = setTimeout(() => {
+      if (!floaterWin || floaterWin.isDestroyed()) return;
+      saveFloaterSettings({ pos: { x: floaterWin.getBounds().x, y: floaterWin.getBounds().y } });
+    }, 400);
+  });
+  floaterWin.on("closed", recoverFloater);
+  floaterWin.webContents.on("render-process-gone", recoverFloater);
+  return floaterWin;
+}
+
+/* if the floater dies while we're floating, bring it right back — otherwise
+   ROOKI silently haunts the background with no visible surface to recover */
+function recoverFloater() {
+  if (currentMode !== "floating" || app.isQuitting) return;
+  setTimeout(() => {
+    if (currentMode !== "floating" || app.isQuitting || !mainWindow || mainWindow.isVisible()) return;
+    const w = createFloater();
+    if (w && !w.isDestroyed()) w.showInactive();
+  }, 350);
+}
+
+/* window-state machine: FULL / MINIMIZED / FLOATING — the brain doesn't care */
+function setMode(mode) {
+  if (!mainWindow) return;
+  currentMode = mode;
+  if (mode === "floating") {
+    mainWindow.hide();
+    const w = createFloater();
+    w.showInactive();
+    return;
+  }
+  if (mode === "minimized") {
+    if (floaterWin && !floaterWin.isDestroyed()) floaterWin.hide();
+    /* real minimize, not hide — keeps the taskbar button so the user can
+       restore; tray click also restores. hide() here trapped the user: no
+       maximize path existed. */
+    if (!mainWindow.isMinimized()) mainWindow.minimize();
+    return;
+  }
+  /* full */
+  if (floaterWin && !floaterWin.isDestroyed()) floaterWin.hide();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function floaterSend(channel, payload) {
+  if (floaterWin && !floaterWin.isDestroyed()) floaterWin.webContents.send(channel, payload);
+}
+
+function openFloaterMenu() {
+  const menu = Menu.buildFromTemplate([
+    { label: "Open ROOKI", click: () => setMode("full") },
+    { type: "separator" },
+    {
+      label: "Minimize",
+      click: () => setMode("minimized"),
+    },
+    {
+      label: "Quit",
+      click: () => {
+        app.isQuitting = true;
+        app.quit();
+      },
+    },
+  ]);
+  menu.popup({ window: floaterWin || mainWindow });
+}
+
+/* ---- IPC: renderer <-> main <-> floater ---- */
+ipcMain.handle("rooki:settings:get", () => loadFloaterSettings());
+ipcMain.handle("rooki:settings:set", (event, patch) => {
+  const clean = {};
+  if (typeof patch?.opacity === "number") clean.opacity = Math.min(1, Math.max(0.2, patch.opacity));
+  if (typeof patch?.size === "number") clean.size = Math.min(128, Math.max(28, patch.size));
+  if (typeof patch?.convOpacity === "number") clean.convOpacity = Math.min(1, Math.max(0.3, patch.convOpacity));
+  if (typeof patch?.fadeMs === "number") clean.fadeMs = Math.min(12000, Math.max(1500, Math.round(patch.fadeMs)));
+  const s = saveFloaterSettings(clean);
+  floaterSend("rooki:settings", s);
+  return s;
+});
+ipcMain.on("rooki:window:mode", (event, mode) => {
+  if (mode === "floating" || mode === "minimized" || mode === "full") setMode(mode);
+});
+ipcMain.on("rooki:conversation", (event, data) => {
+  const text = String(data?.rooki || "").slice(0, 400);
+  const user = String(data?.user || "").slice(0, 200);
+  if (!text && !user) return;
+  floaterSend("rooki:conv", { user, rooki: text, state: data?.state || "speaking" });
+});
+ipcMain.on("rooki:notification", (event, data) => {
+  floaterSend("rooki:notify", { text: String(data?.text || "").slice(0, 300) });
+});
+ipcMain.on("rooki:state", (event, state) => floaterSend("rooki:state", state));
+ipcMain.on("rooki:floating:restore", () => setMode("full"));
+ipcMain.on("rooki:floating:menu", () => openFloaterMenu());
 
 // ---------------------------------------------------------------------------
 // IPC handlers - Web Speech API (no Kokoro)

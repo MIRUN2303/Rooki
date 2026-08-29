@@ -4,7 +4,7 @@ import { audio } from "./voice";
 /* Mic/TTS level meter + "voice detected" tag. Reads the shared audio object
    at rAF rate and writes the DOM directly — no React re-renders. */
 
-const SPEECH_THRESHOLD = 0.07;
+const SPEECH_THRESHOLD = 0.15;
 
 export default function VocalMeter() {
   const fillRef = useRef<HTMLDivElement>(null);

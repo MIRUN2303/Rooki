@@ -20,6 +20,8 @@ import {
   type VoiceState,
   getInputDeviceId,
   stopListening,
+  canRetargetMic,
+  retargetMic,
 } from "./voice";
 import { transcribe } from "./stt";
 import {
@@ -147,6 +149,7 @@ export default function App() {
   const [trace, setTrace] = useState<TurnTrace[]>([]);
   const [debugOpen, setDebugOpen] = useState(false);
   const [schedOpen, setSchedOpen] = useState(false);
+  const [schedListHint, setSchedListHint] = useState(0);
   const [mapOpen, setMapOpen] = useState(false);
   const [showBriefing, setShowBriefing] = useState(false);
   const [briefingData, setBriefingData] = useState<BriefingData | null>(null);
@@ -154,6 +157,8 @@ export default function App() {
   const langRef = useRef<Lang>("en");
   const phaseRef = useRef<VoiceState>("idle");
   const micOnRef = useRef(false);
+  const silentSinceRef = useRef(0);
+  const bounceLockRef = useRef(false);
   const busyRef = useRef(false);
   const transcribingRef = useRef(false);
   const sttPendingRef = useRef(false);
@@ -162,6 +167,7 @@ export default function App() {
   const chatListRef = useRef<HTMLDivElement>(null);
   const turnRef = useRef(false);
   const pendingRef = useRef<string[]>([]);
+  const lastUserRef = useRef<string>("");
   const lastResearchRef = useRef<ResearchResult | null>(null);
   const sessionNotesRef = useRef<string[]>([]);
   const [sttText, setSttText] = useState<{ text: string; n: number } | null>(null);
@@ -176,6 +182,20 @@ export default function App() {
 
   const pushMsg = (m: Omit<Message, "id">) =>
     setMessages((prev) => [...prev, { ...m, id: ++msgId }]);
+
+  /* floating mini mode shows exactly one exchange (last user + last reply);
+     no-op in a plain browser */
+  const floatConversation = (user: string, rooki: string, state?: string) => {
+    window.rookiDesktop?.conversation({ user, rooki, state });
+  };
+
+  /* after a verified external-app launch, ROOKI steps into floating mini
+     mode so the freshly opened app gets the screen (Part 4/5) */
+  const toolEvent = (name: string, res: ToolResult) => {
+    if (name === "app.open" && res.ok && res.verified !== false) {
+      window.rookiDesktop?.windowMode("floating");
+    }
+  };
 
   const later = (fn: () => void, ms: number) => {
     const id = window.setTimeout(fn, ms);
@@ -289,7 +309,10 @@ export default function App() {
 
   /* tools open the panel contextually (scheduler.create / list) */
   useEffect(() => {
-    const onOpen = () => setSchedOpen(true);
+    const onOpen = (e: Event) => {
+      setSchedOpen(true);
+      if ((e as CustomEvent).detail?.view === "list") setSchedListHint((n) => n + 1);
+    };
     window.addEventListener("rooki-scheduler-open", onOpen);
     return () => window.removeEventListener("rooki-scheduler-open", onOpen);
   }, []);
@@ -449,7 +472,9 @@ export default function App() {
 
   const toggleVoice = () => {
     if (micOnRef.current) {
+      micOnRef.current = false;
       stopListening();
+      setPhaseBoth("idle");
       return;
     }
     if (sttPendingRef.current) return; /* a pending auto-send will submit */
@@ -483,6 +508,38 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     };
   }, []);
 
+  /* dead-default safety net: if the auto-picked input shows sustained silence,
+     try ONE other input, then stop and point the user at Settings. Repeating
+     is a livelock — silence can just be a quiet room, not a dead device. */
+  const micBounceUsedRef = useRef(false);
+  const bounceIfSilent = async () => {
+    if (micBounceUsedRef.current || bounceLockRef.current || transcribingRef.current) return;
+    if (!micOnRef.current || !canRetargetMic()) return;
+    micBounceUsedRef.current = true;
+    bounceLockRef.current = true;
+    stopMic();
+    const id = await retargetMic();
+    bounceLockRef.current = false;
+    const zh = langRef.current === "zh";
+    if (id) {
+      pushMsg({
+        role: "ai",
+        text: zh
+          ? `默认麦克风没有信号，已尝试另一输入设备。`
+          : `Default mic had no signal — tried another input device.`,
+      });
+      startRecord();
+      armCap();
+    } else {
+      pushMsg({
+        role: "ai",
+        text: zh
+          ? `未找到有信号的麦克风——请在设置 → 麦克风里手动选择能收音的设备。`
+          : `No mic with signal found — pick the working device under Settings → Microphone.`,
+      });
+    }
+  };
+
   /* utterance segmentation: end after ~1.2s of silence following speech */
   useEffect(() => {
     if (phase !== "listening" && phase !== "researching") return;
@@ -494,17 +551,29 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
            don't let the mic turn it into a user utterance */
         speechSince = 0;
         silenceSince = 0;
+        silentSinceRef.current = 0;
         return;
       }
-      if (audio.level > 0.07) {
+      const SPEECH_START = 0.15; // ponytail: raised from 0.07 — noise was self-triggering
+      const MIN_SPEECH_MS = 350; // ignore sub-second blips
+      if (audio.level > SPEECH_START) {
         silenceSince = 0;
+        silentSinceRef.current = 0;
         speechSince = speechSince || Date.now();
-      } else if (speechSince) {
-        silenceSince = silenceSince || Date.now();
-        if (Date.now() - silenceSince > 1200) {
-          speechSince = 0;
-          silenceSince = 0;
-          transcribeUtterance();
+      } else {
+        if (!silentSinceRef.current) silentSinceRef.current = Date.now();
+        else if (Date.now() - silentSinceRef.current > 8000) {
+          silentSinceRef.current = 0;
+          bounceIfSilent();
+        }
+        if (speechSince) {
+          if (Date.now() - speechSince < MIN_SPEECH_MS) return;
+          silenceSince = silenceSince || Date.now();
+          if (Date.now() - silenceSince > 1200) {
+            speechSince = 0;
+            silenceSince = 0;
+            transcribeUtterance();
+          }
         }
       }
     }, 120);
@@ -537,7 +606,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
         gapSince = 0;
         return;
       }
-      if (audio.level > 0.085) {
+      if (audio.level > 0.18) {
         gapSince = 0;
         if (!burstActive) {
           burstActive = true;
@@ -579,6 +648,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
   const answer = (text: string, emotion?: string) => {
     resetRecord(); /* clear mic buffer so ROOKI's own voice isn't transcribed */
     pushMsg({ role: "ai", text, accent: STATE_COLORS.speaking.accent });
+    floatConversation(lastUserRef.current, text, "speaking");
     setPhaseBoth("speaking");
     if (speakOn) speak(text, langRef.current, emotionStyle(emotion ?? ""));
     const dur = Math.min(4000, 1400 + text.length * 38);
@@ -597,6 +667,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
   ) => {
     resetRecord();
     pushMsg({ role: "ai", text, accent: STATE_COLORS.speaking.accent, ...m });
+    floatConversation(lastUserRef.current, text, "speaking");
     setPhaseBoth("speaking");
     if (speakOn) speak(spoken ?? text, langRef.current, emotionStyle(emotion ?? ""));
     const dur = Math.min(4000, 1400 + text.length * 38);
@@ -999,6 +1070,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
       startResearch: (r: string, l: Lang, followUp: boolean, silent: boolean, mode?: ResearchMode) => startResearch(r, l, followUp, silent, mode),
       stopAll: (l: Lang) => stopAll(l),
       userText: raw,
+      onTool: toolEvent,
     };
     const outcome = await runTurn(raw, settings, lang, names, deps);
     if ("error" in outcome) {
@@ -1144,12 +1216,14 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
     startResearch: (r, l, followUp, silent, mode) => startResearch(r, l, followUp, silent, mode),
     stopAll: (l) => stopAll(l),
     userText: raw,
+    onTool: toolEvent,
   });
 
   /* a fast-bind confirmation: chat bubble + queued voice (joins the native
      queue — never cuts the in-flight answer), phase state untouched */
   const quickReply = (text: string) => {
     pushMsg({ role: "ai", text, accent: STATE_COLORS.speaking.accent });
+    floatConversation(lastUserRef.current, text, "speaking");
     if (speakOn) speakQueued(text, langRef.current);
   };
 
@@ -1189,6 +1263,24 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
 
     /* image-editing context ("brightness of the image") is NOT the display */
     if (/image|photo|picture|pic|图片|照片|海报|图像/.test(t)) return null;
+
+    /* window-state commands — floating/minimized vs full */
+    if (/(?:minimize|shrink|hide)\s+(?:yourself|your\s*window|the\s*window)\b|go\s+floating\b|悬浮|迷你模式|躲起来/.test(t)) {
+      return {
+        run: async () => {
+          window.rookiDesktop?.windowMode("floating");
+          quickReply(zh ? "好的，我在悬浮模式。" : "Got it — going floating.");
+        },
+      };
+    }
+    if (/\b(?:maximize|show|restore)\s+(?:yourself|your\s*window|the\s*window)\b|\bcome\s*back\b|回到主窗口|显示自己|恢复窗口/.test(t)) {
+      return {
+        run: async () => {
+          window.rookiDesktop?.windowMode("full");
+          quickReply(zh ? "回来了，主窗口已恢复。" : "Back — full window restored.");
+        },
+      };
+    }
 
     const target: "volume" | "brightness" | null =
       /volume|音量|声音/.test(t) ? "volume" : /brightness|亮度/.test(t) ? "brightness" : null;
@@ -1312,6 +1404,7 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
   const send = (raw: string) => {
     const lang: Lang = /[\u4e00-\u9fa5]/.test(raw) ? "zh" : "en";
     langRef.current = lang;
+    lastUserRef.current = raw;
     const fast = matchFastCommand(raw, lang);
     if (fast) {
       pushMsg({ role: "user", text: raw });
@@ -1421,6 +1514,18 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
             <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
           </svg>
         </button>
+        {window.rookiDesktop && (
+          <button
+            className="icon-btn"
+            onClick={() => window.rookiDesktop!.windowMode("minimized")}
+            title="minimize window"
+            aria-label="minimize window"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M2.5 11.5h11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            </svg>
+          </button>
+        )}
       </header>
 
       <main className="stage">
@@ -1519,7 +1624,11 @@ startMic(getInputDeviceId() ?? undefined).then((r) => {
             />
           </div>
         </div>
-        <SchedulerPanel open={schedOpen && stackTab === "sched"} onClose={() => setSchedOpen(false)} />
+        <SchedulerPanel
+          open={schedOpen && stackTab === "sched"}
+          onClose={() => setSchedOpen(false)}
+          listHint={schedListHint}
+        />
           {mapOpen && <MapPanel onClose={() => setMapOpen(false)} />}
         </div>
 

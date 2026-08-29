@@ -37,6 +37,25 @@ contextBridge.exposeInMainWorld("rookiDesktop", {
     return () => ipcRenderer.removeListener("tts-event", listener);
   },
 
+  // Floating mini mode (this renderer -> main -> floater window)
+  conversation: (data) =>
+    ipcRenderer.send("rooki:conversation", data),
+
+  notify: (data) =>
+    ipcRenderer.send("rooki:notification", data),
+
+  setFloatingState: (state) =>
+    ipcRenderer.send("rooki:state", state),
+
+  windowMode: (mode) =>
+    ipcRenderer.send("rooki:window:mode", mode),
+
+  floatingSettingsGet: () =>
+    ipcRenderer.invoke("rooki:settings:get"),
+
+  floatingSettingsSet: (patch) =>
+    ipcRenderer.invoke("rooki:settings:set", patch),
+
   // Platform info
   isDesktop: true,
   platform: process.platform,

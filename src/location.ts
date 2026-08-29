@@ -218,7 +218,23 @@ export async function setLocation(loc: Omit<LocationContext, "updatedAt">): Prom
 }
 
 export async function searchLocation(query: string): Promise<GeocodeResult[]> {
-  return nominatimSearch(query);
+  let res = await nominatimSearch(query);
+  if (res.length) return res;
+  /* transcription often mangles the spelling ("eiffel towr" → "Eiffel Tower").
+     Fall back to a web search to recover the canonical name, then re-geocode. */
+  try {
+    const { webSearch } = await import("./research");
+    const found = await webSearch(`${query} location map`);
+    for (const f of found.slice(0, 3)) {
+      const candidate = f.name.replace(/\s*[-–|].*$/, "").trim();
+      if (candidate.toLowerCase() === query.toLowerCase()) continue;
+      const retry = await nominatimSearch(candidate);
+      if (retry.length) return retry;
+    }
+  } catch {
+    /* web fallback failed — return the empty result */
+  }
+  return res;
 }
 
 export async function geocodeAddress(address: string): Promise<GeocodeResult | null> {

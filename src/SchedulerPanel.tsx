@@ -1,7 +1,8 @@
-/* ROOKI scheduler/calendar visual layer.
+/* ROOKI scheduler/calendar visual layer — v2 "ledger" skin.
    PRESENTATION ONLY — reads/writes through src/scheduler.ts exactly as before.
-   Visual state here (viewed month, selected date, view mode) never duplicates
-   scheduler state; it only drives which slice of real data is shown. */
+   Visual state here (viewed month, selected date, view mode, quick-create
+   wheels) never duplicates scheduler state; it only drives which slice of
+   real data is shown. All logic/handlers are unchanged from v1. */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -41,36 +42,35 @@ function accentFor(t: ScheduledTask): "violet" | "blue" | "amber" {
   return "violet";
 }
 
-/* ── mini building blocks ─────────────────────────────────────────── */
+/* ── ledger building blocks ─────────────────────────────────────── */
 
-function EventItem({ t, onAct }: { t: ScheduledTask; onAct: () => void }) {
+function TaskEntry({ t, onAct }: { t: ScheduledTask; onAct: () => void }) {
   const acc = accentFor(t);
   const active = t.status === "scheduled" || t.status === "snoozed";
+  const done = t.status === "completed" || t.status === "cancelled";
   return (
-    <div className={`scheduler-event acc-${acc} st-${t.status}`}>
-      <span className="scheduler-event-accent" />
-      <div className="scheduler-event-main">
-        <span className="scheduler-event-time">{hm(t.nextRunAt)}</span>
-        <span className="scheduler-event-title">{t.title}</span>
-        <span className="scheduler-event-meta">
+    <div className={`sch-task acc-${acc} st-${t.status}`}>
+      <span className="sch-task-time">{hm(t.nextRunAt)}</span>
+      <div className="sch-task-main">
+        <span className="sch-task-title">{t.title}</span>
+        <span className="sch-task-meta">
           {describeTrigger(t.trigger)}
-          {t.status !== "scheduled" && t.status !== "snoozed" ? ` · ${t.status}` : ""}
+          {!active ? ` · ${t.status}` : ""}
         </span>
       </div>
       {active && (
-        <div className="scheduler-event-actions">
-          <button title="done" onClick={() => { completeTask(t.id); onAct(); }}>✓</button>
-          <button title="snooze 10 min" onClick={() => { snoozeTask(t.id, { minutes: 10 }); onAct(); }}>+10</button>
-          <button title="cancel" onClick={() => { cancelTask(t.id); onAct(); }}>×</button>
+        <div className="sch-task-acts">
+          <button className="sch-act" title="done" onClick={() => { completeTask(t.id); onAct(); }}>✓</button>
+          <button className="sch-act" title="snooze 10 min" onClick={() => { snoozeTask(t.id, { minutes: 10 }); onAct(); }}>+10</button>
+          <button className="sch-act" title="cancel" onClick={() => { cancelTask(t.id); onAct(); }}>×</button>
         </div>
       )}
+      {done && <span className="sch-task-done">{t.status === "completed" ? "done" : "gone"}</span>}
     </div>
   );
 }
 
-/* ── main panel ───────────────────────────────────────────────────── */
-
-/* ── scroll-snap time wheel (presentation only) ── */
+/* ── scroll-snap time wheel (presentation only, v1 mechanics) ── */
 const WHEEL_H = 30;
 
 function Wheel({
@@ -88,14 +88,14 @@ function Wheel({
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, []);
   return (
-    <div className="scheduler-wheel" role="listbox" aria-label={label}>
-      <div ref={ref} className="scheduler-wheel-scroll" onScroll={() => {
+    <div className="sch-wheel" role="listbox" aria-label={label}>
+      <div ref={ref} className="sch-wheel-scroll" onScroll={() => {
         const el = ref.current!;
         onChange(Math.max(0, Math.min(items.length - 1, Math.round(el.scrollTop / WHEEL_H))));
       }}>
         <div style={{ height: WHEEL_H }} />
         {items.map((it, i) => (
-          <div key={i} style={{ height: WHEEL_H }} className={`scheduler-wheel-item${i === value ? " on" : ""}`}>{it}</div>
+          <div key={i} style={{ height: WHEEL_H }} className={`sch-wheel-item${i === value ? " on" : ""}`}>{it}</div>
         ))}
         <div style={{ height: WHEEL_H }} />
       </div>
@@ -106,12 +106,23 @@ function Wheel({
 export default function SchedulerPanel({
   open,
   onClose,
+  listHint = 0,
 }: {
   open: boolean;
   onClose: () => void;
+  listHint?: number;
 }) {
   const [, force] = useState(0);
   useEffect(() => onSchedulerChange(() => force((v) => v + 1)), []);
+
+  /* calendar collapses to a slim strip; "show my schedules/reminders" opens
+     the split list view */
+  const [collapsed, setCollapsed] = useState(false);
+  const [listTab, setListTab] = useState(false);
+  const [listGroup, setListGroup] = useState<"reminders" | "schedules">("reminders");
+  useEffect(() => {
+    if (listHint > 0) { setListTab(true); setCollapsed(false); }
+  }, [listHint]);
 
   /* visual-only state */
   const today = useMemo(() => new Date(), []);
@@ -176,6 +187,8 @@ export default function SchedulerPanel({
 
   const active = listTasks({ status: ["scheduled", "snoozed"] });
   const doneItems = listTasks({ status: ["completed", "cancelled"] }).slice(-4).reverse();
+  const reminders = active.filter((t) => t.trigger.kind === "once");
+  const schedules = active.filter((t) => t.trigger.kind !== "once");
 
   const selKey = selDate.toDateString();
   const selTasks = active.filter((t) => t.nextRunAt && sameDay(new Date(t.nextRunAt), selDate));
@@ -255,32 +268,56 @@ export default function SchedulerPanel({
 
   const monthName = new Date(viewYm.y, viewYm.m, 1).toLocaleDateString([], { month: "long", year: "numeric" });
   const selLabel = selDate.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+  const isCurrentMonth = viewYm.y === today.getFullYear() && viewYm.m === today.getMonth();
 
   return (
-    <aside className={`panel-shell scheduler-panel${open ? " open" : ""}`}>
-      {/* ambient interior light */}
-      <i className="scheduler-light scheduler-light-violet" />
-      <i className="scheduler-light scheduler-light-blue" />
+    <aside className={`panel-shell scheduler-panel sch${open ? " open" : ""}${collapsed ? " collapsed" : ""}`}>
+      {/* ledger frame + corner ticks + ruled paper */}
+      <i className="sch-frame" />
+      <i className="sch-rule" />
+      <i className="sch-light sch-light-violet" />
+      <i className="sch-light sch-light-blue" />
 
+      {collapsed ? (
+        <button className="scheduler-strip" onClick={() => setCollapsed(false)} aria-label="expand calendar">
+          <i className="sch-rail" />
+          <span className="panel-title">
+            Calendar
+            {active.length > 0 && <span className="sch-count">{active.length}</span>}
+          </span>
+          <span className="sch-strip-month">{monthName}{listTab ? " · list" : ""}</span>
+          <span className="sch-strip-next">
+            {active.length > 0
+              ? `${dayLabel(active[0].nextRunAt)} ${hm(active[0].nextRunAt)} · ${active[0].title}`
+              : "nothing scheduled"}
+          </span>
+          <span className="sch-strip-exp">▸</span>
+        </button>
+      ) : (
+        <>
       <header className="panel-header">
         <h3 className="panel-title">
           Calendar
-          {active.length > 0 && <span className="scheduler-count">{active.length}</span>}
+          {active.length > 0 && <span className="sch-count">{active.length}</span>}
         </h3>
         <div className="scheduler-head-tools">
-          <div className="scheduler-view-switch" role="tablist">
-            <button className={mode === "month" ? "on" : ""} onClick={() => setMode("month")} aria-label="month view">M</button>
-            <button className={mode === "day" ? "on" : ""} onClick={() => setMode("day")} aria-label="day view">D</button>
-          </div>
+          <button className={`icon-btn scheduler-list-btn${listTab ? " on" : ""}`} onClick={() => { setListTab((v) => !v); setListGroup("reminders"); }} title="my schedules & reminders" aria-label="schedules and reminders">☰</button>
+          {!listTab && (
+            <div className="scheduler-view-switch" role="tablist">
+              <button className={mode === "month" ? "on" : ""} onClick={() => setMode("month")} aria-label="month view">M</button>
+              <button className={mode === "day" ? "on" : ""} onClick={() => setMode("day")} aria-label="day view">D</button>
+            </div>
+          )}
           <button className={`scheduler-add${quick ? " on" : ""}`} onClick={() => setQuick((v) => !v)} aria-label="new reminder">+</button>
+          <button className="icon-btn" onClick={() => setCollapsed(true)} title="collapse to a strip" aria-label="collapse calendar">▾</button>
           <button className="panel-close" onClick={onClose} aria-label="close scheduler">×</button>
         </div>
       </header>
 
       {/* quick create — bound to the selected day, wheel time picker */}
       {quick && (
-        <div className="scheduler-quick">
-          <div className="scheduler-quick-row">
+        <div className="sch-quick">
+          <div className="sch-quick-row">
             <input
               autoFocus
               value={quickTitle}
@@ -288,19 +325,19 @@ export default function SchedulerPanel({
               onKeyDown={(e) => e.key === "Enter" && quickAdd()}
               placeholder={`Remind me on ${selLabel}…`}
             />
-            <button className="scheduler-quick-close" onClick={() => setQuick(false)} aria-label="close quick create">×</button>
+            <button className="sch-quick-close" onClick={() => setQuick(false)} aria-label="close quick create">×</button>
           </div>
-          <div className="scheduler-quick-row">
-            <span className="scheduler-quick-day-chip">{selDate.getDate()} {selDate.toLocaleDateString([], { month: "short" })}</span>
+          <div className="sch-quick-row">
+            <span className="sch-quick-day">{selDate.getDate()} {selDate.toLocaleDateString([], { month: "short" })}</span>
             <Wheel label="hour" items={[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]} value={wh} onChange={setWh} />
             <Wheel label="minute" items={Array.from({ length: 60 }, (_, i) => String(i).padStart(2, "0"))} value={wm} onChange={setWm} />
-            <div className="scheduler-wheel-ap">
+            <div className="sch-ap">
               {(["AM", "PM"] as const).map((ap) => (
                 <button key={ap} className={wap === ap ? "on" : ""} onClick={() => setWap(ap)}>{ap}</button>
               ))}
             </div>
             <button
-              className="scheduler-quick-go"
+              className="sch-go"
               onClick={quickAdd}
               disabled={!quickTitle.trim() || selTimeIsPast}
               title={selTimeIsPast ? "that time already passed — pick a later time or another day" : undefined}
@@ -311,21 +348,44 @@ export default function SchedulerPanel({
         </div>
       )}
 
-      <div className="panel-body scheduler-body">
+      <div className="panel-body scheduler-body sch-body">
+        {listTab ? (
+          <div className="sch-list">
+            <div className="sch-list-tabs">
+              <button className={listGroup === "reminders" ? "on" : ""} onClick={() => setListGroup("reminders")}>Reminders</button>
+              <button className={listGroup === "schedules" ? "on" : ""} onClick={() => setListGroup("schedules")}>Schedules</button>
+            </div>
+            <div className="sch-list-items">
+              {(listGroup === "reminders" ? reminders : schedules).length === 0 && (
+                <div className="sch-empty">nothing here yet</div>
+              )}
+              {(listGroup === "reminders" ? reminders : schedules).map((t, i) => (
+                <div key={t.id} className="sch-ledger-row">
+                  <span className="sch-ledger-no">{String(i + 1).padStart(2, "0")}</span>
+                  <TaskEntry t={t} onAct={refresh} />
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+        <>
         {/* ── MONTH VIEW: calendar grid ── */}
         {mode === "month" && (
           <>
-            <div className="scheduler-cal-head">
-              <button className="scheduler-nav" onClick={() => shiftMonth(-1)} aria-label="previous month">‹</button>
-              <span className="scheduler-month">{monthName}</span>
-              <button className="scheduler-nav" onClick={() => shiftMonth(1)} aria-label="next month">›</button>
+            <div className="sch-mhead">
+              <button className="sch-nav" onClick={() => shiftMonth(-1)} aria-label="previous month">‹</button>
+              <span className="sch-mtitle">{monthName}</span>
+              {!isCurrentMonth && (
+                <button className="sch-today-stamp" onClick={() => setViewYm({ y: today.getFullYear(), m: today.getMonth() })} title="jump to current month">TODAY</button>
+              )}
+              <button className="sch-nav" onClick={() => shiftMonth(1)} aria-label="next month">›</button>
             </div>
 
-            <div className="scheduler-weekdays">
+            <div className="sch-wd">
               {["MO", "TU", "WE", "TH", "FR", "SA", "SU"].map((d) => <span key={d}>{d}</span>)}
             </div>
 
-            <div className="scheduler-grid" ref={gridRef} onMouseMove={onGridMove}>
+            <div className="sch-grid" ref={gridRef} onMouseMove={onGridMove}>
               {grid.map((d) => {
                 const out = d.getMonth() !== viewYm.m;
                 const isToday = sameDay(d, today);
@@ -335,7 +395,7 @@ export default function SchedulerPanel({
                   <button
                     key={d.toISOString()}
                     className={[
-                      "scheduler-cell",
+                      "sch-cell",
                       out ? "out" : "",
                       isToday ? "today" : "",
                       isSel ? "sel" : "",
@@ -344,16 +404,16 @@ export default function SchedulerPanel({
                     style={{ animationDelay: `${grid.indexOf(d) * 3}ms` }}
                     onClick={() => pick(d)}
                   >
-                    <span className="scheduler-cell-num">{d.getDate()}</span>
-                    {dots?.size ? (
+                    <span className="sch-num">{d.getDate()}</span>
+                    {dots ? (
                       dots.size > 1 ? (
-                        <span className={`scheduler-cell-pin multi ${[...dots][0]}`} title={`${dots.size} scheduled`}>
-                          {dots.size}
-                        </span>
+                        <i className={`sch-seal ${[...dots][0]}`} title={`${dots.size} scheduled`}>{dots.size}</i>
                       ) : (
-                        <i className={`scheduler-cell-pin ${[...dots][0]}`} title="scheduled" />
+                        <i className={`sch-dot ${[...dots][0]}`} title="scheduled" />
                       )
-                    ) : null}
+                    ) : (
+                      <i className="sch-dot empty" />
+                    )}
                   </button>
                 );
               })}
@@ -362,64 +422,68 @@ export default function SchedulerPanel({
         )}
 
         {/* ── shared lower half: selected-day schedule ── */}
-        <div className="scheduler-day-schedule" key={`${mode}-${selKey}-${viewYm.m}`}>
-          <div className="scheduler-sel-date">
-            <span className="scheduler-sel-big">{selDate.getDate()}</span>
-            <span className="scheduler-sel-cal">
-              {selDate.toLocaleDateString([], { month: "long" })}
-              <small>{selLabel}</small>
+        <div className="sch-sheet" key={`${mode}-${selKey}-${viewYm.m}`}>
+          <div className="sch-sheet-head">
+            <span className="sch-sheet-date">
+              <b>{selDate.getDate()}</b>
+              <i>{selDate.toLocaleDateString([], { month: "short" })}</i>
             </span>
-            <b>
+            <span className="sch-sheet-week">{selLabel.split(",")[0]}</span>
+            <span className="sch-sheet-state">
               {selTasks.length > 0 ? `${selTasks.length} scheduled` : "free"}
-              <i className="scheduler-rel">
+              <small>
                 {relDays === 0 ? "today" : relDays === 1 ? "tomorrow" : relDays === -1 ? "yesterday" : relDays > 1 ? `in ${relDays} days` : `${-relDays} days ago`}
-              </i>
-            </b>
+              </small>
+            </span>
           </div>
 
-          {/* weather strip — only within ±3 days (wttr 3-day forecast limit) */}
+          {/* weather chip — only within ±3 days (wttr 3-day forecast limit) */}
           {(wx || wxMiss) && Math.abs(relDays) <= 3 && (
-            <div className={`scheduler-wx${wx ? "" : " miss"}`}>
+            <div className={`sch-wx${wx ? "" : " miss"}`}>
               {wx ? (
                 <>
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" className="scheduler-wx-ico">
-                    <circle cx="12" cy="12" r="4.4" stroke="currentColor" strokeWidth="1.5" />
-                    <path d="M12 2.8v2M12 19.2v2M2.8 12h2M19.2 12h2M5.5 5.5l1.4 1.4M17.1 17.1l1.4 1.4M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" className="sch-wx-ico">
+                    <circle cx="12" cy="12" r="4.4" stroke="currentColor" strokeWidth="1.6" />
+                    <path d="M12 2.8v2M12 19.2v2M2.8 12h2M19.2 12h2M5.5 5.5l1.4 1.4M17.1 17.1l1.4 1.4M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
                   </svg>
                   <b>{wx.max}°<i>/{wx.min}°</i></b>
                   <span>{wx.desc}</span>
-                  {wx.sunrise && (
-                    <small>↑{wx.sunrise.slice(0, 5)} ↓{wx.sunset?.slice(0, 5)}</small>
+                  {(wx.sunrise || wx.sunset) && (
+                    <small>↑{wx.sunrise?.slice(0, 5)} ↓{wx.sunset?.slice(0, 5)}</small>
                   )}
                 </>
               ) : (
-                <span className="scheduler-wx-na">weather unavailable for this day</span>
+                <span className="sch-wx-na">weather unavailable for this day</span>
               )}
             </div>
           )}
 
           {selTasks.length === 0 && doneSel.length === 0 ? (
-            <div className="scheduler-free">Nothing on this day</div>
+            <div className="sch-free">Nothing on this day</div>
           ) : (
-            selTasks.map((t) => <EventItem key={t.id} t={t} onAct={refresh} />)
+            selTasks.map((t) => <TaskEntry key={t.id} t={t} onAct={refresh} />)
           )}
-          {doneSel.map((t) => <EventItem key={t.id} t={t} onAct={refresh} />)}
+          {doneSel.map((t) => <TaskEntry key={t.id} t={t} onAct={refresh} />)}
 
           {upcoming.length > 0 && (
-            <>
-              <div className="scheduler-upcoming-label">Upcoming</div>
+            <div className="sch-up">
+              <div className="sch-up-head">Upcoming</div>
               {upcoming.map((t) => (
-                <button key={t.id} className={`scheduler-upcoming-item acc-${accentFor(t)}`} onClick={() => pick(new Date(t.nextRunAt!))}>
-                  <span className="scheduler-event-accent" />
-                  <span className="scheduler-up-date">{dayLabel(t.nextRunAt)}</span>
-                  <span className="scheduler-up-time">{hm(t.nextRunAt)}</span>
-                  <span className="scheduler-up-title">{t.title}</span>
+                <button key={t.id} className={`sch-up-row acc-${accentFor(t)}`} onClick={() => pick(new Date(t.nextRunAt!))}>
+                  <i className="sch-up-rail" />
+                  <span className="sch-up-date">{dayLabel(t.nextRunAt)}</span>
+                  <span className="sch-up-time">{hm(t.nextRunAt)}</span>
+                  <span className="sch-up-title">{t.title}</span>
                 </button>
               ))}
-            </>
+            </div>
           )}
         </div>
+        </>
+        )}
       </div>
+      </>
+      )}
     </aside>
   );
 }
@@ -455,16 +519,16 @@ export function SchedulerToasts() {
   };
 
   return (
-    <div className="scheduler-toasts">
+    <div className="sch-toasts">
       {items.map((n) => (
-        <div key={n.id} className={`scheduler-toast${n.missed || n.priority === "high" ? " high" : ""}${leaving.has(n.id) ? " leaving" : ""}`}>
-          <div className="scheduler-toast-head">
-            <span className="scheduler-toast-ping" />
+        <div key={n.id} className={`sch-toast${n.missed || n.priority === "high" ? " high" : ""}${leaving.has(n.id) ? " leaving" : ""}`}>
+          <div className="sch-toast-head">
+            <span className="sch-toast-ping" />
             {n.missed ? "Missed reminder" : "Reminder"}
           </div>
-          <div className="scheduler-toast-title">{n.title}</div>
-          {n.message && <div className="scheduler-toast-msg">{n.message}</div>}
-          <div className="scheduler-toast-actions">
+          <div className="sch-toast-title">{n.title}</div>
+          {n.message && <div className="sch-toast-msg">{n.message}</div>}
+          <div className="sch-toast-acts">
             {n.taskId && (
               <>
                 <button onClick={() => dismiss(n.id, () => completeTask(n.taskId!))}>Done</button>

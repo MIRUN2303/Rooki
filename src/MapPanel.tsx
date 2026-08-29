@@ -21,6 +21,17 @@ interface PlaceHit {
   longitude: number;
 }
 
+interface RouteDetail {
+  origin: { latitude: number; longitude: number };
+  destination: { latitude: number; longitude: number; name: string };
+  geometry: [number, number][];
+  bounds: { minLat: number; minLon: number; maxLat: number; maxLon: number };
+  distanceMeters: number;
+  durationSeconds: number;
+  steps: string[];
+  mode: string;
+}
+
 interface MapPanelProps {
   onClose: () => void;
 }
@@ -226,6 +237,64 @@ export default function MapPanel({ onClose }: MapPanelProps) {
     window.addEventListener("rooki-map-locate", onLocate);
     return () => window.removeEventListener("rooki-map-locate", onLocate);
   }, [showPlaces]);
+
+  /* draw a road route (real geometry from location.manage) on the shared
+     rooki-route layer; retries until the map's layers are up */
+  const pendingRouteRef = useRef<RouteDetail | null>(null);
+  const drawRouteFull = useCallback(
+    (d: RouteDetail): boolean => {
+      const map = mapRef.current;
+      if (!map || !readyRef.current) return false;
+      clearMarkers();
+      setStatus("success");
+      setQuery(`${d.destination.name} · route by ${d.mode}`);
+      const line = {
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            properties: {},
+            geometry: { type: "LineString", coordinates: d.geometry.map(([lat, lon]) => [lon, lat]) },
+          },
+        ],
+      };
+      const src = map.getSource("rooki-route") as maplibregl.GeoJSONSource | undefined;
+      if (src) src.setData(line as GeoJSON.GeoJSON);
+      const og = document.createElement("div");
+      og.className = "rooki-marker origin";
+      originMarkerRef.current = new maplibregl.Marker({ element: og })
+        .setLngLat([d.origin.longitude, d.origin.latitude])
+        .addTo(map);
+      const dm = document.createElement("div");
+      dm.className = "rooki-marker primary";
+      markersRef.current.push(new maplibregl.Marker({ element: dm })
+        .setLngLat([d.destination.longitude, d.destination.latitude])
+        .addTo(map));
+      map.fitBounds(
+        new maplibregl.LngLatBounds(
+          [d.bounds.minLon, d.bounds.minLat],
+          [d.bounds.maxLon, d.bounds.maxLat]
+        ),
+        { padding: 70, duration: 1400 }
+      );
+      return true;
+    },
+    [clearMarkers]
+  );
+
+  useEffect(() => {
+    const onRoute = (e: Event) => {
+      pendingRouteRef.current = (e as CustomEvent).detail as RouteDetail;
+      const tryDraw = () => {
+        const d = pendingRouteRef.current;
+        if (d && drawRouteFull(d)) pendingRouteRef.current = null;
+        else setTimeout(tryDraw, 250);
+      };
+      tryDraw();
+    };
+    window.addEventListener("rooki-map-route", onRoute);
+    return () => window.removeEventListener("rooki-map-route", onRoute);
+  }, [drawRouteFull]);
 
   useEffect(() => {
     const map = mapRef.current;

@@ -35,6 +35,21 @@ export default function SettingsModal({ open, settings, onChange, onClose, onCle
   const [notes, setNotes] = useState<Partial<Record<ProviderId, string>>>({});
   const [inputDevices, setInputDevices] = useState<MediaDeviceInfo[]>([]);
   const [outputDevices, setOutputDevices] = useState<MediaDeviceInfo[]>([]);
+  const isDesktop = typeof window !== "undefined" && !!window.rookiDesktop;
+  const [float, setFloat] = useState<FloatingSettings | null>(null);
+
+  useEffect(() => {
+    if (!open || !isDesktop) return;
+    window.rookiDesktop!.floatingSettingsGet().then((s) => setFloat(s));
+  }, [open, isDesktop]);
+
+  const setFloatPatch = (patch: Partial<FloatingSettings>) => {
+    setFloat((f) => {
+      const next = { ...(f as FloatingSettings), ...patch };
+      window.rookiDesktop!.floatingSettingsSet(next);
+      return next;
+    });
+  };
 
   const refreshDevices = useCallback(async () => {
     const [inputs, outputs] = await Promise.all([
@@ -213,6 +228,66 @@ export default function SettingsModal({ open, settings, onChange, onClose, onCle
               </p>
             )}
           </div>
+
+          {isDesktop && float && (
+            <div className="set-group">
+              <span className="set-group-title">Floating mini mode</span>
+              <label className="set-field">
+                <span>Icon opacity ({Math.round(float.opacity * 100)}%)</span>
+                <input
+                  type="range"
+                  min={0.2}
+                  max={1}
+                  step={0.05}
+                  value={float.opacity}
+                  onChange={(e) => setFloatPatch({ opacity: parseFloat(e.target.value) })}
+                />
+              </label>
+              <label className="set-field">
+                <span>Icon size ({Math.round(float.size)}px ≈ { (float.size / 96).toFixed(2) }in)</span>
+                <input
+                  type="range"
+                  min={28}
+                  max={128}
+                  step={1}
+                  value={float.size}
+                  onChange={(e) => setFloatPatch({ size: parseInt(e.target.value, 10) })}
+                />
+              </label>
+              <label className="set-field">
+                <span>Conversation opacity ({Math.round(float.convOpacity * 100)}%)</span>
+                <input
+                  type="range"
+                  min={0.3}
+                  max={1}
+                  step={0.05}
+                  value={float.convOpacity}
+                  onChange={(e) => setFloatPatch({ convOpacity: parseFloat(e.target.value) })}
+                />
+              </label>
+              <label className="set-field">
+                <span>Conversation fade ({float.fadeMs / 1000}s)</span>
+                <input
+                  type="range"
+                  min={2000}
+                  max={10000}
+                  step={500}
+                  value={float.fadeMs}
+                  onChange={(e) => setFloatPatch({ fadeMs: parseInt(e.target.value, 10) })}
+                />
+              </label>
+              <div className="set-row">
+                <span>Minimize myself</span>
+                <button className="set-btn" onClick={() => window.rookiDesktop!.windowMode("floating")}>
+                  Go floating
+                </button>
+              </div>
+              <p className="set-hint">
+                Opening an external app (or saying "minimize yourself") gently tucks ROOKI into a
+                small icon. Click the icon (or tray → Show ROOKI) to come back. Settings persist.
+              </p>
+            </div>
+          )}
 
           <div className="set-group">
             <span className="set-group-title">AI providers</span>

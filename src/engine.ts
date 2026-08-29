@@ -45,10 +45,12 @@ export interface ChartData {
   kind: ChartKind;
   title: Bi;
   subtitle?: Bi;
+  labels?: string[];
   bars?: BarItem[];
   points?: number[];
   donut?: DonutSlice[];
   max?: number;
+  horizontal?: boolean;
 }
 export interface ResearchResult {
   topic: Bi;

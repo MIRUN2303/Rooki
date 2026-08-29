@@ -14,13 +14,23 @@ interface Check {
 
 const INITIAL_CHECKS: Check[] = [
   { id: "ui", label: "UI CORE", weight: 10, state: "pending" },
-  { id: "stt", label: "STT · PARAKEET", weight: 55, state: "pending" },
-  { id: "mic", label: "MICROPHONE", weight: 20, state: "pending" },
-  { id: "tts", label: "VOICE OUT", weight: 15, state: "pending" },
+  { id: "stt", label: "STT · PARAKEET", weight: 62, state: "pending" },
+  { id: "tts", label: "VOICE OUT", weight: 28, state: "pending" },
 ];
 
-const STT_TIMEOUT_MS = 45_000;
+/* Parakeet cold load (CPU) is ~1.5–3 min; the old 45s timeout made STT fail
+   its boot check on every cold start even though it comes up fine later. */
+const STT_TIMEOUT_MS = 180_000;
 const STT_POLL_MS = 700;
+/* hard ceiling: whatever else happens, this boot is over fast. The mic was
+   removed from boot entirely (a silent default device still grants a stream,
+   and the permission dialog can pend forever in Electron) — the runtime
+   handles mic picking instead. STT is a background warmup: if it isn't ready
+   when the ceiling hits, the boot degrades it (not fails it) and carries on —
+   typed input works regardless, and the runtime keeps answering as the model
+   loads. A "stuck" boot must be structurally impossible. */
+const BOOT_WATCHDOG_MS = 15_000;
+const BOOT_MIN_MS = 5000;
 
 function getGreeting(): { text: string; period: string } {
   const h = new Date().getHours();
@@ -49,7 +59,9 @@ async function probeSTT(): Promise<{ up: boolean; stage: string }> {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 1500);
-    const r = await fetch("/stt/health", { signal: ctrl.signal });
+    /* hit the STT server directly (CORS is open) — works in dev, preview,
+       plain browser, and the packaged file:// build, unlike the /stt proxy */
+    const r = await fetch("http://127.0.0.1:8765/health", { signal: ctrl.signal });
     clearTimeout(t);
     if (!r.ok) {
       try {
@@ -66,54 +78,40 @@ async function probeSTT(): Promise<{ up: boolean; stage: string }> {
   }
 }
 
-function speakUntilStarted(text: string): () => void {
+/* Boot voice — NEW reliable method: a pre-rendered offline WAV played through
+   an <audio> element (no flaky Web Speech, no 100MB model, instant + offline).
+   Falls back to native speech only if the asset is somehow missing. */
+function playBootVoice(): () => void {
   let stopped = false;
-  let anyStarted = false;
-  const synth: SpeechSynthesis | null = "speechSynthesis" in window ? window.speechSynthesis : null;
-  if (!synth) return () => {};
-  synth.cancel(); // cut any prior utterance (loading splash) before boot voice
-
-  const cleanup = () => { stopped = true; synth.cancel(); };
-
-  const speakRetry = (attempt: number) => {
+  const audio = new Audio("/boot-greeting.wav");
+  audio.volume = 1;
+  audio.preload = "auto";
+  const fallback = () => {
     if (stopped) return;
-    /* Electron/Chromium loads voices async — first getVoices() may be empty */
-    const voices = synth.getVoices();
-    if (!voices.length && attempt < 4) {
-      setTimeout(() => speakRetry(attempt + 1), 400);
-      return;
-    }
-    const v = voices.find((vv) => vv.lang.startsWith("en")) || voices.find((vv) => vv.default);
-    const u = new SpeechSynthesisUtterance(text);
-    if (v) u.voice = v;
-    u.rate = 1.0;
-    let started = false;
-    u.onstart = () => { started = true; anyStarted = true; };
-    u.onend = u.onerror = () => { if (!stopped) cleanup(); };
-    synth.resume();
-    synth.speak(u);
-    /* engine may silently drop the first utterance — re-speak once if nothing started */
-    setTimeout(() => {
-      if (!started && !stopped) {
-        synth.cancel();
-        synth.speak(u);
+    stopped = true;
+    try {
+      const s = window.speechSynthesis;
+      if (s) {
+        s.cancel();
+        s.speak(new SpeechSynthesisUtterance("Rooki systems initializing."));
       }
-    }, 800);
+    } catch {
+      /* no voice available */
+    }
   };
-
-  const onv = () => { if (!stopped) speakRetry(0); };
-  synth.addEventListener("voiceschanged", onv);
-  speakRetry(0);
-
-  /* hard timeout - never let boot hang on voice */
-  setTimeout(() => { if (!stopped) cleanup(); }, 8000);
-
+  audio.onerror = fallback;
+  const p = audio.play();
+  if (p && typeof (p as Promise<void>).catch === "function") {
+    (p as Promise<void>).catch(() => fallback());
+  }
   return () => {
     stopped = true;
-    /* if the greeting already started, let it finish — cancel would cut it
-       mid-word right as boot completes and the boot screen unmounts */
-    if (!anyStarted) synth.cancel();
-    synth.removeEventListener("voiceschanged", onv);
+    try {
+      audio.pause();
+      audio.currentTime = 0;
+    } catch {
+      /* ignore */
+    }
   };
 }
 
@@ -123,6 +121,7 @@ export default function BootScreen({ onComplete }: { onComplete: () => void }) {
   const [stage, setStage] = useState("initializing");
   const [showChecks, setShowChecks] = useState(false);
   const [leaving, setLeaving] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
   const greet = useRef(getGreeting());
   const doneRef = useRef(false);
   const stopVoiceRef = useRef<(() => void) | null>(null);
@@ -150,16 +149,14 @@ export default function BootScreen({ onComplete }: { onComplete: () => void }) {
     const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
     (async () => {
-      setStage("mounting interface");
+      setStage("ROOKI systems initializing");
       patch("ui", "running");
       await wait(250);
       if (!alive) return;
       bank("ui");
 
       const g = greet.current;
-      stopVoiceRef.current = speakUntilStarted(
-        "ROOKI systems initializing."
-      );
+      stopVoiceRef.current = playBootVoice();
 
       patch("stt", "running");
       const t0 = Date.now();
@@ -168,12 +165,13 @@ export default function BootScreen({ onComplete }: { onComplete: () => void }) {
       for (;;) {
         if (!alive) return;
         const s = await probeSTT();
-        if (!alive) return;
+        if (!alive || doneRef.current) return;
         creditSTT(STT_STAGE_CREDIT[s.stage] ?? 0);
         if (s.stage === "ready") {
           sttReady = true;
           break;
         }
+        if (s.up) { /* keep polling */ }
         const secs = Math.round((Date.now() - t0) / 1000);
         const msg = s.up
           ? s.stage === "loading_weights"
@@ -191,28 +189,16 @@ export default function BootScreen({ onComplete }: { onComplete: () => void }) {
            just spams ECONNREFUSED logs while it loads */
         await wait(s.up ? STT_POLL_MS : 3000);
       }
-      if (!alive) return;
+      if (!alive || doneRef.current) return;
       if (sttReady) {
         setStage("transcribe engine online");
         bank("stt");
       } else {
-        setStage("stt offline — degraded boot");
-        patch("stt", "error");
+        /* warming, not failed: keep it out of the "error" gate and let the
+           runtime finish loading it in the background */
+        setStage("stt warming · continues in background");
+        patch("stt", "degraded");
       }
-
-      setStage("verifying microphone");
-      patch("mic", "running");
-      let micOk = false;
-      try {
-        const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
-        micOk = tmp.getAudioTracks().length > 0;
-        tmp.getTracks().forEach((tr) => tr.stop());
-      } catch {
-        micOk = false;
-      }
-      if (!alive) return;
-      if (micOk) bank("mic");
-      else patch("mic", "error");
 
       setStage("warming voice output");
       patch("tts", "running");
@@ -230,31 +216,61 @@ export default function BootScreen({ onComplete }: { onComplete: () => void }) {
     };
   }, []);
 
-  useEffect(() => {
-    const iv = setInterval(() => {
-      setDisplay((p) => {
-        const t = realTarget.current;
-        if (p >= t) return t;
-        return Math.min(t, p + Math.max(0.4, (t - p) * 0.18));
-      });
-    }, 40);
-    return () => clearInterval(iv);
-  }, []);
+useEffect(() => {
+  const iv = setInterval(() => {
+    setDisplay((p) => {
+      const t = realTarget.current;
+      if (p >= t) return t;
+      return Math.min(t, p + Math.max(0.4, (t - p) * 0.18));
+    });
+  }, 40);
+  return () => clearInterval(iv);
+}, []);
 
-  const settled = checks.every((c) => c.state === "ok" || c.state === "error");
+/* absolute watchdog: no configuration of this screen may outlive the ceiling.
+   If the pipeline stalls on anything (a probe that never settles, a corrupt
+   promise, a frozen fetch) the user still lands in the interface. */
+const latestOnComplete = useRef(onComplete);
+useEffect(() => {
+  latestOnComplete.current = onComplete;
+});
+const watchdogDone = useRef(false);
+useEffect(() => {
+  const t = setTimeout(() => {
+    if (watchdogDone.current) return;
+    watchdogDone.current = true;
+    doneRef.current = true;
+    latestOnComplete.current();
+  }, BOOT_WATCHDOG_MS);
+  return () => clearTimeout(t);
+}, []);
+
+  const failed = checks.filter((c) => c.state === "error");
+  const settled = checks.every((c) => c.state !== "running" && c.state !== "pending");
+  const bootStart = useRef(Date.now());
   useEffect(() => {
     if (!settled || doneRef.current) return;
+    /* a failed check must be seen, not auto-skipped: hold the boot, open the
+       checks, and make the user consciously continue into the interface */
+    if (failed.length > 0 && !confirmed) {
+      setShowChecks(true);
+      setStage("degraded boot — review, then continue");
+      return;
+    }
     doneRef.current = true;
-    const t1 = setTimeout(() => setLeaving(true), 650);
-    const t2 = setTimeout(onComplete, 1350);
+    /* hold the boot card a beat even when everything is instant, so the
+       interface reveal comes as a transition, not a sudden swap */
+    const since = Date.now() - bootStart.current;
+    const waitMs = Math.max(0, BOOT_MIN_MS - since);
+    const t1 = setTimeout(() => setLeaving(true), 650 + waitMs);
+    const t2 = setTimeout(onComplete, 1350 + waitMs);
     return () => {
       clearTimeout(t1);
       clearTimeout(t2);
     };
-  }, [settled, onComplete]);
+  }, [settled, confirmed, failed.length, onComplete]);
 
   const g = greet.current;
-  const failed = checks.filter((c) => c.state === "error");
   const pct = Math.round(display);
   const R = 46; // progress ring radius in viewBox units
 
@@ -381,6 +397,12 @@ export default function BootScreen({ onComplete }: { onComplete: () => void }) {
         <div className="boot-foot">
           {settled ? (failed.length ? `${failed.length} SUBSYSTEM${failed.length > 1 ? "S" : ""} DEGRADED` : "ALL SYSTEMS NOMINAL") : "INITIALIZING"}
         </div>
+
+        {settled && failed.length > 0 && !confirmed && (
+          <button className="boot-continue" onClick={() => setConfirmed(true)}>
+            CONTINUE TO INTERFACE
+          </button>
+        )}
       </div>
     </div>
   );

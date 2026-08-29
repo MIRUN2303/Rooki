@@ -12,15 +12,6 @@ const sttProxy = {
       proxy.on("error", () => {});
     },
   },
-  "/tts": {
-    target: "http://127.0.0.1:8767",
-    changeOrigin: true,
-    rewrite: (p: string) => p.replace(/^\/tts/, ""),
-    /* Kokoro TTS warms up on first run; ECONNREFUSED during that window is normal */
-    configure: (proxy: { on: (ev: string, cb: () => void) => void }) => {
-      proxy.on("error", () => {});
-    },
-  },
   "/yt": {
     target: "https://www.youtube.com",
     changeOrigin: true,
@@ -40,6 +31,11 @@ const sttProxy = {
     target: "https://commons.wikimedia.org",
     changeOrigin: true,
     rewrite: (p: string) => p.replace(/^\/commons/, ""),
+  },
+  "/gnews": {
+    target: "https://news.google.com",
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(/^\/gnews/, ""),
   },
   "/agent": {
     target: "http://127.0.0.1:8766",

@@ -222,7 +222,14 @@ function markFailure(id: ProviderId, err: LlmError) {
   const h = HEALTH[id];
   h.fails++;
   const transient = ["rate_limit_error", "timeout_error", "server_error", "network_error"].includes(err.type);
-  const backoff = transient ? Math.min(300_000, 5000 * 2 ** h.fails) : 600_000;
+  // rate-limit recovers on its own reset window — keep the cooldown short so
+  // ROOKI returns to the primary as soon as the limit lifts
+  const backoff =
+    err.type === "rate_limit_error"
+      ? 15_000
+      : transient
+        ? Math.min(300_000, 5000 * 2 ** h.fails)
+        : 600_000;
   h.cooldownUntil = Date.now() + backoff;
 }
 

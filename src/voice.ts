@@ -54,7 +54,131 @@ let chunks: Blob[] = [];
 
 export type MicResult = { ok: boolean; reason?: "denied" | "nomic" | "busy" | "insecure" | "failed" };
 
+/* Chromium routes the DEFAULT input to whatever Windows thinks is "in use" —
+   often a Bluetooth hands-free endpoint that answers getUserMedia but captures
+   pure digital silence. So we open each input for a beat, keep the first one
+   with real signal, and reuse it for the rest of the session. */
+let liveDeviceId: string | null = null;
+const LIVE_CLEAR = 0.03; // normalized spectrum max that qualifies as "real" input
+/* digital-silence floor: a dead endpoint (Bluetooth hands-free answering with
+   nothing, muted array) reads ~0 bins; the faintest real noise reads higher */
+const FLOOR_CLEAR = 0.02;
+let pinnedInput: string | null = null;
+
+function probeMaxAudio(deviceId: string, ms: number): Promise<number> {
+  return new Promise((resolve) => {
+    let finalize = false;
+    let ctx: AudioContext | null = null;
+    let probeStream: MediaStream | null = null;
+    const finish = (v: number) => {
+      if (finalize) return;
+      finalize = true;
+      window.clearTimeout(t);
+      probeStream?.getTracks().forEach((tr) => tr.stop());
+      ctx?.close().catch(() => {});
+      resolve(v);
+    };
+    const t = window.setTimeout(() => finish(0), ms + 500);
+    navigator.mediaDevices
+      .getUserMedia({ audio: { deviceId: { exact: deviceId } } })
+      .then((st) => {
+        probeStream = st;
+        ctx = new AudioContext();
+        const an = ctx.createAnalyser();
+        an.fftSize = 1024;
+        an.smoothingTimeConstant = 0.3;
+        ctx.createMediaStreamSource(st).connect(an);
+        const buf = new Uint8Array(an.frequencyBinCount);
+        const t0 = performance.now();
+        const tick = () => {
+          if (finalize) return;
+          an.getByteFrequencyData(buf);
+          let mx = 0;
+          for (let i = 0; i < buf.length; i++) if (buf[i] > mx) mx = buf[i];
+          if (mx / 255 >= LIVE_CLEAR) return finish(mx / 255);
+          if (performance.now() - t0 < ms) requestAnimationFrame(tick);
+          else finish(mx / 255);
+        };
+        tick();
+      })
+      .catch(() => finish(0));
+  });
+}
+
+async function pickLiveDevice(exclude?: string): Promise<string | null> {
+  const devices = (await enumerateAudioInputDevices()).slice(0, 6);
+  const prefer = devices
+    .filter((d) => !/hands-?free|telephony/i.test(d.label))
+    .filter((d) => d.deviceId !== exclude);
+  const rest = devices.filter((d) => prefer.indexOf(d) < 0 && d.deviceId !== exclude);
+  const ordered = [...prefer, ...rest];
+  /* if every other input is excluded/invalid, retry the excluded one — a
+     "nowhere better exists" answer beats coming back empty-handed */
+  if (exclude && !ordered.length) ordered.push(devices.find((d) => d.deviceId === exclude)!);
+  let bestId: string | null = null;
+  let bestMax = 0;
+  for (const d of ordered) {
+    if (!d) continue;
+    const mx = await probeMaxAudio(d.deviceId, 1300);
+    if (mx >= LIVE_CLEAR) return d.deviceId;
+    if (mx >= FLOOR_CLEAR && mx > bestMax) {
+      bestMax = mx;
+      bestId = d.deviceId;
+    }
+  }
+  return bestId;
+}
+
 export async function startMic(deviceId?: string | null): Promise<MicResult> {
+  /* a device handed in (settings/UI) is a user choice — honored, not probed */
+  if (deviceId) {
+    pinnedInput = deviceId;
+    return startMicFor(deviceId);
+  }
+  pinnedInput = null;
+  if (liveDeviceId) return startMicFor(liveDeviceId);
+  const chosen = await pickLiveDevice();
+  if (chosen) {
+    liveDeviceId = chosen;
+    selectedInputDeviceId = chosen;
+    return startMicFor(chosen);
+  }
+  return startMicFor(null);
+}
+
+/* true if the current input was auto-picked (not pinned by the user) and we
+   hold a *different* live device we can fail over to */
+export function canRetargetMic(): boolean {
+  return !pinnedInput && liveDeviceId !== null;
+}
+
+/* the dead-default net: if the auto-picked device turns out to be silent,
+   close it and reopen the next best live one. Returns the new device id, or
+   null if there's nowhere better to go (keep the current input). */
+export async function retargetMic(): Promise<string | null> {
+  if (pinnedInput) return null;
+  const previous = liveDeviceId;
+  stopMic();
+  const chosen = await pickLiveDevice(previous ?? undefined);
+  if (!chosen || chosen === previous) {
+    if (previous) {
+      liveDeviceId = previous;
+      await startMicFor(previous);
+    }
+    return null;
+  }
+  liveDeviceId = chosen;
+  selectedInputDeviceId = chosen;
+  const r = await startMicFor(chosen);
+  if (!r.ok) return null;
+  return chosen;
+}
+
+export function getLiveDeviceId(): string | null {
+  return liveDeviceId;
+}
+
+export async function startMicFor(deviceId: string | null): Promise<MicResult> {
   try {
     const constraints: MediaStreamConstraints = {
       audio: deviceId ? { deviceId: { exact: deviceId } } : true
@@ -195,7 +319,10 @@ function micLoop() {
       pw += v * i;
       total += v;
     }
-    audio.level = sum / n;
+    /* ponytail: +2dB fixed input boost (10^(2/20) ≈ 1.259) applied post-FFT —
+       quieter voices meter/trigger higher without touching the device gain.
+       Clamp keeps the level inside 0..1 for the meter and speech gate. */
+    audio.level = Math.min(1, (sum / n) * 1.259);
     audio.pitch = total > 0 ? pw / total / n : 0.5;
     /* smooth amplitude so the strands/meter breathe with the mic */
     audio.amplitude += (audio.level - audio.amplitude) * 0.18;
@@ -268,6 +395,9 @@ export function speak(text: string, lang: "en" | "zh", style?: { rate: number; p
   // Track speaking state
   u.onstart = () => {
     setState("speaking");
+    // mark transcription quiet while ROOKI speaks, so the mic doesn't hear its
+    // own voice and answer itself
+    quietUntilAt = Date.now() + 800 + text.length * (lang === "zh" ? 95 : 60);
   };
   u.onend = () => {
     setState("completed");
